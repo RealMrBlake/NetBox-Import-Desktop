@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 APP_NAME = "NetBox VM Import"
+SECRET_KEYS = ("password", "token_secret")
 
 
 def config_path():
@@ -28,7 +29,7 @@ def _blob(data):
 
 
 def protect(value):
-    """Encrypt a string for the current Windows user using DPAPI."""
+    """Encrypt a value for the current Windows user with DPAPI."""
     if not value:
         return ""
     if sys.platform != "win32":
@@ -40,18 +41,16 @@ def protect(value):
     ):
         raise ctypes.WinError()
     try:
-        encrypted = ctypes.string_at(result.pbData, result.cbData)
-        return base64.b64encode(encrypted).decode("ascii")
+        return base64.b64encode(ctypes.string_at(result.pbData, result.cbData)).decode("ascii")
     finally:
         ctypes.windll.kernel32.LocalFree(result.pbData)
 
 
 def unprotect(value):
-    """Decrypt a DPAPI string for the current Windows user."""
+    """Decrypt a DPAPI value for the current Windows user."""
     if not value:
         return ""
-    encrypted = base64.b64decode(value)
-    source, source_buffer = _blob(encrypted)
+    source, source_buffer = _blob(base64.b64decode(value))
     result = _DataBlob()
     if not ctypes.windll.crypt32.CryptUnprotectData(
         ctypes.byref(source), None, None, None, None, 0, ctypes.byref(result)
@@ -74,25 +73,56 @@ class ProfileStore:
             data = json.load(stream)
 
         profiles = {}
-        for item in data.get("profiles", []):
-            name = item.get("name", "").strip()
+        for record in data.get("profiles", []):
+            name = record.get("name", "").strip()
             if not name:
                 continue
-            profile = dict(item)
-            profile["esxi_password"] = unprotect(item.get("esxi_password_encrypted", ""))
-            profile["netbox_token"] = unprotect(item.get("netbox_token_encrypted", ""))
+            profile = {
+                "name": name,
+                "netbox_url": record.get("netbox_url", ""),
+                "netbox_token": unprotect(record.get("netbox_token_encrypted", "")),
+                "netbox_ignore_ssl": bool(record.get("netbox_ignore_ssl", record.get("ignore_ssl_errors", False))),
+                "sources": [],
+            }
+            for source_record in record.get("sources", []):
+                source = dict(source_record)
+                for key in SECRET_KEYS:
+                    encrypted_key = f"{key}_encrypted"
+                    if encrypted_key in source:
+                        source[key] = unprotect(source.pop(encrypted_key))
+                profile["sources"].append(source)
+
+            # Migration from v2: one VMware source embedded in each profile.
+            if not profile["sources"] and record.get("esxi_host"):
+                profile["sources"].append({
+                    "id": "vmware-legacy",
+                    "type": "vmware",
+                    "name": "VMware",
+                    "enabled": True,
+                    "host": record.get("esxi_host", ""),
+                    "username": record.get("esxi_user", ""),
+                    "password": unprotect(record.get("esxi_password_encrypted", "")),
+                    "ignore_ssl": bool(record.get("ignore_ssl_errors", False)),
+                })
             profiles[name] = profile
 
-        # Migration from the original single-profile, plaintext format.
+        # Migration from the first plaintext single-profile format.
         if not profiles and any(key in data for key in ("esxi_host", "netbox_url")):
             profiles["Standard"] = {
                 "name": "Standard",
-                "esxi_host": data.get("esxi_host", ""),
-                "esxi_user": data.get("esxi_user", ""),
-                "esxi_password": data.get("esxi_password", ""),
                 "netbox_url": data.get("netbox_url", ""),
                 "netbox_token": data.get("netbox_token", ""),
-                "ignore_ssl_errors": bool(data.get("ignore_ssl_errors", False)),
+                "netbox_ignore_ssl": bool(data.get("ignore_ssl_errors", False)),
+                "sources": [{
+                    "id": "vmware-legacy",
+                    "type": "vmware",
+                    "name": "VMware",
+                    "enabled": True,
+                    "host": data.get("esxi_host", ""),
+                    "username": data.get("esxi_user", ""),
+                    "password": data.get("esxi_password", ""),
+                    "ignore_ssl": bool(data.get("ignore_ssl_errors", False)),
+                }],
             }
         return profiles, data.get("active_profile", "")
 
@@ -100,16 +130,22 @@ class ProfileStore:
         records = []
         for name in sorted(profiles, key=str.casefold):
             profile = profiles[name]
+            sources = []
+            for source_data in profile.get("sources", []):
+                source = {key: value for key, value in source_data.items() if key not in SECRET_KEYS}
+                for key in SECRET_KEYS:
+                    if key in source_data:
+                        source[f"{key}_encrypted"] = protect(source_data.get(key, ""))
+                sources.append(source)
             records.append({
                 "name": name,
-                "esxi_host": profile.get("esxi_host", ""),
-                "esxi_user": profile.get("esxi_user", ""),
-                "esxi_password_encrypted": protect(profile.get("esxi_password", "")),
                 "netbox_url": profile.get("netbox_url", ""),
                 "netbox_token_encrypted": protect(profile.get("netbox_token", "")),
-                "ignore_ssl_errors": bool(profile.get("ignore_ssl_errors", False)),
+                "netbox_ignore_ssl": bool(profile.get("netbox_ignore_ssl", False)),
+                "sources": sources,
             })
-        payload = {"version": 2, "active_profile": active_profile, "profiles": records}
+
+        payload = {"version": 3, "active_profile": active_profile, "profiles": records}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = self.path.with_suffix(".tmp")
         with temp_path.open("w", encoding="utf-8") as stream:

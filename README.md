@@ -1,11 +1,12 @@
 # NetBox VM Import Desktop
 
-Windows-Desktopanwendung zum Importieren und Synchronisieren virtueller Maschinen aus VMware ESXi/vSphere nach NetBox.
+Windows-Desktopanwendung zum Importieren und Synchronisieren virtueller Maschinen aus VMware ESXi/vSphere und Proxmox VE nach NetBox.
 
 ## Funktionen
 
-- Mehrere kundenbezogene VMware- und NetBox-Profile
-- Mit Windows DPAPI verschlüsselte Passwörter und API-Token
+- Mehrere VMware- und Proxmox-Quellen pro Kundenprofil
+- QEMU/KVM-VMs und optional LXC-Container aus Proxmox VE
+- Mit Windows DPAPI verschlüsselte Passwörter, API-Token und Token-Secrets
 - Optionale Unterstützung selbstsignierter TLS-Zertifikate
 - Synchronisierung von VMs, Hardwaredaten, Interfaces und IP-Adressen
 - Übernahme primärer IPv4- und IPv6-Adressen
@@ -30,4 +31,3 @@ python app.py
 ```powershell
 pyinstaller "NetBox VM Import.spec"
 ```
-
