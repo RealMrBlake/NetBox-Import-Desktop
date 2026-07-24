@@ -1,0 +1,11 @@
+.venv/
+build/
+__pycache__/
+*.py[cod]
+*.zip
+output/
+
+# Lokale Konfigurationen und Zugangsdaten
+config.json
+*.tmp
+

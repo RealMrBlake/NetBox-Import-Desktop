@@ -1,0 +1,33 @@
+# NetBox VM Import Desktop
+
+Windows-Desktopanwendung zum Importieren und Synchronisieren virtueller Maschinen aus VMware ESXi/vSphere nach NetBox.
+
+## Funktionen
+
+- Mehrere kundenbezogene VMware- und NetBox-Profile
+- Mit Windows DPAPI verschlüsselte Passwörter und API-Token
+- Optionale Unterstützung selbstsignierter TLS-Zertifikate
+- Synchronisierung von VMs, Hardwaredaten, Interfaces und IP-Adressen
+- Übernahme primärer IPv4- und IPv6-Adressen
+
+## Verwendung
+
+Die fertige Windows-Anwendung befindet sich unter `dist/NetBox VM Import.exe`.
+
+Profile werden im Benutzerprofil unter `%APPDATA%\NetBox VM Import\config.json` gespeichert. Passwort und Token sind an das jeweilige Windows-Benutzerkonto und den Rechner gebunden verschlüsselt.
+
+## Entwicklung
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python app.py
+```
+
+## EXE erstellen
+
+```powershell
+pyinstaller "NetBox VM Import.spec"
+```
+
