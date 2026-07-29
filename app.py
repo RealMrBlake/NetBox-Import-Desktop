@@ -134,6 +134,47 @@ class SourceDialog(tk.Toplevel):
         self.destroy()
 
 
+class TenantConfirmationDialog(tk.Toplevel):
+    """Require explicit tenant confirmation before changing NetBox VMs."""
+
+    def __init__(self, parent, cluster_name, tenants, default_tenant=""):
+        super().__init__(parent)
+        self.title("Mandant bestätigen")
+        self.geometry("500x260")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self.result = None
+        self.tenant_name = tk.StringVar(value=default_tenant)
+
+        body = ttk.Frame(self, padding=22)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="Mandant für die Synchronisierung", font=("Segoe UI Semibold", 14)).pack(anchor="w")
+        ttk.Label(
+            body,
+            text=f"Cluster: {cluster_name}\n\nDer Mandant des Clusters wurde vorausgewählt. Bitte bestätigen oder einen anderen Mandanten auswählen.",
+            wraplength=450,
+            justify="left",
+        ).pack(anchor="w", pady=(8, 14))
+        self.combo = ttk.Combobox(body, textvariable=self.tenant_name, values=tenants, state="readonly")
+        self.combo.pack(fill="x")
+
+        buttons = ttk.Frame(body)
+        buttons.pack(anchor="e", pady=(20, 0))
+        ttk.Button(buttons, text="Abbrechen", command=self.destroy).pack(side="left", padx=4)
+        ttk.Button(buttons, text="Mandant bestätigen", command=self.accept, style="Primary.TButton").pack(side="left", padx=4)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.wait_window(self)
+
+    def accept(self):
+        tenant = self.tenant_name.get().strip()
+        if not tenant:
+            messagebox.showwarning("Mandant fehlt", "Bitte einen Mandanten auswählen.", parent=self)
+            return
+        self.result = tenant
+        self.destroy()
+
+
 class NetBoxVMImporter:
     def __init__(self, root):
         self.root = root
@@ -146,6 +187,7 @@ class NetBoxVMImporter:
         self.profiles = {}
         self.current_sources = []
         self.cluster_map = {}
+        self.cluster_tenants = {}
         self.tenant_map = {}
         self.platforms = []
         self.profile_name = tk.StringVar()
@@ -245,7 +287,8 @@ class NetBoxVMImporter:
         workspace.add(target_card, weight=1)
         workspace.add(vm_card, weight=4)
         self.cluster_combo = self.add_combo_field(target_card, 0, "Cluster")
-        self.tenant_combo = self.add_combo_field(target_card, 1, "Tenant")
+        self.tenant_combo = self.add_combo_field(target_card, 1, "Mandant")
+        self.cluster_combo.bind("<<ComboboxSelected>>", self.on_cluster_selected)
         target_card.columnconfigure(0, weight=1)
 
         vm_columns = ("name", "source", "kind", "status", "cpu", "memory")
@@ -487,9 +530,38 @@ class NetBoxVMImporter:
         tenants = list(self.nb.tenancy.tenants.all())
         self.cluster_map = {item.name: item.id for item in clusters}
         self.tenant_map = {item.name: item.id for item in tenants}
+        self.cluster_tenants = {}
+        for cluster in clusters:
+            tenant = getattr(cluster, "tenant", None)
+            if tenant:
+                tenant_name = getattr(tenant, "name", None)
+                tenant_id = getattr(tenant, "id", None)
+                if isinstance(tenant, dict):
+                    tenant_name = tenant.get("name")
+                    tenant_id = tenant.get("id")
+                if tenant_name and tenant_id:
+                    self.cluster_tenants[cluster.name] = {
+                        "name": tenant_name,
+                        "id": tenant_id,
+                    }
+                    self.tenant_map.setdefault(tenant_name, tenant_id)
         self.cluster_combo["values"] = sorted(self.cluster_map, key=str.casefold)
         self.tenant_combo["values"] = sorted(self.tenant_map, key=str.casefold)
         self.platforms = list(self.nb.dcim.platforms.all())
+
+    def on_cluster_selected(self, _event=None):
+        cluster_name = self.cluster_combo.get()
+        cluster_tenant = self.cluster_tenants.get(cluster_name)
+        if cluster_tenant:
+            self.tenant_combo.set(cluster_tenant["name"])
+            self.status_text.set(
+                f"Mandant „{cluster_tenant['name']}“ vom Cluster „{cluster_name}“ übernommen"
+            )
+        else:
+            self.tenant_combo.set("")
+            self.status_text.set(
+                f"Cluster „{cluster_name}“ hat keinen Mandanten – Auswahl vor dem Sync erforderlich"
+            )
 
     def load_vmware_source(self, source):
         self.log(f"Verbinde zu VMware: {source['name']} …")
@@ -753,11 +825,26 @@ class NetBoxVMImporter:
         if not selected:
             messagebox.showwarning("Hinweis", "Keine VMs ausgewählt.")
             return
-        cluster_id = self.cluster_map.get(self.cluster_combo.get())
-        tenant_id = self.tenant_map.get(self.tenant_combo.get())
+        cluster_name = self.cluster_combo.get()
+        cluster_id = self.cluster_map.get(cluster_name)
         if not cluster_id:
             messagebox.showerror("Fehler", "Bitte einen NetBox-Cluster auswählen.")
             return
+        inherited_tenant = self.cluster_tenants.get(cluster_name, {}).get("name", "")
+        default_tenant = self.tenant_combo.get() or inherited_tenant
+        confirmation = TenantConfirmationDialog(
+            self.root,
+            cluster_name,
+            sorted(self.tenant_map, key=str.casefold),
+            default_tenant,
+        )
+        if confirmation.result is None:
+            self.log("Synchronisierung durch Benutzer abgebrochen")
+            return
+        tenant_name = confirmation.result
+        tenant_id = self.tenant_map[tenant_name]
+        self.tenant_combo.set(tenant_name)
+        self.log(f"Mandant bestätigt: {tenant_name}")
         failures = []
         for item_id in selected:
             vm_data = self.vms[int(item_id)]

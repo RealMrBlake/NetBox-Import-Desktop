@@ -7,6 +7,7 @@ Windows-Desktopanwendung zum Importieren und Synchronisieren virtueller Maschine
 - Mehrere VMware- und Proxmox-Quellen pro Kundenprofil
 - QEMU/KVM-VMs und optional LXC-Container aus Proxmox VE
 - Mit Windows DPAPI verschlüsselte Passwörter, API-Token und Token-Secrets
+- Automatische Übernahme des Cluster-Mandanten mit verbindlicher Bestätigung vor dem Sync
 - Optionale Unterstützung selbstsignierter TLS-Zertifikate
 - Synchronisierung von VMs, Hardwaredaten, Interfaces und IP-Adressen
 - Übernahme primärer IPv4- und IPv6-Adressen
