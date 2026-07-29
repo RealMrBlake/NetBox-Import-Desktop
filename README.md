@@ -9,7 +9,7 @@ Windows-Desktopanwendung zum Importieren und Synchronisieren virtueller Maschine
 - Mit Windows DPAPI verschlüsselte Passwörter, API-Token und Token-Secrets
 - Automatische Übernahme des Cluster-Mandanten mit verbindlicher Bestätigung vor dem Sync
 - Mandantenzuweisung für IPv4-/IPv6-Adressen und erkannte NetBox-Präfixe
-- Bestätigungsdialog mit Subnetzgrößen- und vorausgefüllter VRF-Auswahl vor jeder Präfix-Erstellung
+- Bestätigungsdialog mit Subnetzgrößen- und vorausgefüllter VRF-Auswahl sowie optionaler VRF-Erstellung
 - Auswahl vorhandener Mandanten-VRFs oder automatische VRF-Erstellung pro Cluster mit frei wählbarem Namen
 - Optionale Unterstützung selbstsignierter TLS-Zertifikate
 - Synchronisierung von VMs, Hardwaredaten, Interfaces und IP-Adressen

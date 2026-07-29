@@ -240,10 +240,20 @@ class VRFSelectionDialog(tk.Toplevel):
 class PrefixCreationDialog(tk.Toplevel):
     """Ask explicitly before creating a missing IPv4 or IPv6 prefix."""
 
-    def __init__(self, parent, address, detected_prefix=True, vrfs=None, default_vrf_id=None):
+    AUTO_CREATE = "➕ Neue VRF anlegen"
+
+    def __init__(
+        self,
+        parent,
+        address,
+        detected_prefix=True,
+        vrfs=None,
+        default_vrf_id=None,
+        tenant_name="Mandant",
+    ):
         super().__init__(parent)
         self.title("Subnetz anlegen?")
-        self.geometry("560x390")
+        self.geometry("560x455")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -256,11 +266,13 @@ class PrefixCreationDialog(tk.Toplevel):
             display = f"{vrf.name} (RD: {rd})" if rd else vrf.name
             self.vrf_map[display] = vrf.id
             vrf_values.append(display)
+        vrf_values.append(self.AUTO_CREATE)
         default_vrf = next(
             (display for display, vrf_id in self.vrf_map.items() if vrf_id == default_vrf_id),
-            vrf_values[0] if vrf_values else "",
+            self.AUTO_CREATE,
         )
         self.vrf_selection = tk.StringVar(value=default_vrf)
+        self.new_vrf_name = tk.StringVar(value=f"{tenant_name} - VRF")
 
         interface = ipaddress.ip_interface(address)
         self.host_address = interface.ip
@@ -308,7 +320,14 @@ class PrefixCreationDialog(tk.Toplevel):
             state="readonly",
         )
         vrf_combo.pack(side="left", fill="x", expand=True, padx=(12, 0))
-        vrf_combo.bind("<<ComboboxSelected>>", self.update_preview)
+        vrf_combo.bind("<<ComboboxSelected>>", self.update_vrf_fields)
+
+        new_vrf_row = ttk.Frame(body)
+        new_vrf_row.pack(fill="x", pady=(10, 0))
+        ttk.Label(new_vrf_row, text="Neue VRF").pack(side="left")
+        self.new_vrf_entry = ttk.Entry(new_vrf_row, textvariable=self.new_vrf_name)
+        self.new_vrf_entry.pack(side="left", fill="x", expand=True, padx=(12, 0))
+        self.new_vrf_name.trace_add("write", self.update_preview)
         ttk.Label(body, textvariable=self.preview_text, foreground="#334e68", font=("Segoe UI Semibold", 10)).pack(
             anchor="w", pady=(14, 0)
         )
@@ -323,7 +342,7 @@ class PrefixCreationDialog(tk.Toplevel):
         buttons.pack(anchor="e", pady=(22, 0))
         ttk.Button(buttons, text="Nicht anlegen", command=self.destroy).pack(side="left", padx=4)
         ttk.Button(buttons, text="Präfix anlegen", command=self.accept, style="Primary.TButton").pack(side="left", padx=4)
-        self.update_preview()
+        self.update_vrf_fields()
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.wait_window(self)
 
@@ -331,14 +350,32 @@ class PrefixCreationDialog(tk.Toplevel):
         length = int(self.prefix_length.get().lstrip("/"))
         return ipaddress.ip_network(f"{self.host_address}/{length}", strict=False)
 
-    def update_preview(self, _event=None):
+    def update_vrf_fields(self, _event=None):
+        is_new = self.vrf_selection.get() == self.AUTO_CREATE
+        self.new_vrf_entry.configure(state="normal" if is_new else "disabled")
+        self.update_preview()
+
+    def update_preview(self, *_args):
         vrf_name = self.vrf_selection.get() or "keine VRF"
+        if vrf_name == self.AUTO_CREATE:
+            vrf_name = self.new_vrf_name.get().strip() or "neue VRF ohne Namen"
         self.preview_text.set(f"Wird angelegt: {self.selected_network()} · VRF: {vrf_name}")
 
     def accept(self):
         network = self.selected_network()
         selected_vrf = self.vrf_selection.get()
-        if selected_vrf not in self.vrf_map:
+        if selected_vrf == self.AUTO_CREATE:
+            vrf_name = self.new_vrf_name.get().strip()
+            if not vrf_name:
+                messagebox.showwarning("VRF-Name fehlt", "Bitte einen Namen für die neue VRF eingeben.", parent=self)
+                return
+            vrf_id = None
+            create_vrf = True
+        elif selected_vrf in self.vrf_map:
+            vrf_name = None
+            vrf_id = self.vrf_map[selected_vrf]
+            create_vrf = False
+        else:
             messagebox.showwarning("VRF fehlt", "Bitte eine VRF für das Präfix auswählen.", parent=self)
             return
         if network.version == 4 and str(network.network_address).split(".")[-1] != "0":
@@ -348,7 +385,12 @@ class PrefixCreationDialog(tk.Toplevel):
                 parent=self,
             )
             return
-        self.result = {"network": str(network), "vrf_id": self.vrf_map[selected_vrf]}
+        self.result = {
+            "network": str(network),
+            "vrf_id": vrf_id,
+            "create_vrf": create_vrf,
+            "vrf_name": vrf_name,
+        }
         self.destroy()
 
 
@@ -1087,6 +1129,13 @@ class NetBoxVMImporter:
             return vrf_id
 
         vrf_name = dialog.result["name"]
+        try:
+            return self.get_or_create_tenant_vrf(vrf_name, tenant_id)
+        except Exception as error:
+            messagebox.showerror("VRF konnte nicht erstellt werden", str(error))
+            return None
+
+    def get_or_create_tenant_vrf(self, vrf_name, tenant_id):
         existing = next(
             (
                 vrf for vrf in self.vrfs
@@ -1096,21 +1145,17 @@ class NetBoxVMImporter:
             None,
         )
         if existing:
-            self.log(f"Vorhandene automatisch benannte VRF verwendet: {vrf_name}")
+            self.log(f"Vorhandene VRF verwendet: {vrf_name}")
             return existing.id
 
-        try:
-            vrf = self.nb.ipam.vrfs.create({
-                "name": vrf_name,
-                "tenant": tenant_id,
-                "enforce_unique": True,
-                "description": "Automatisch erstellt durch NetBox VM Import",
-            })
-        except Exception as error:
-            messagebox.showerror("VRF konnte nicht erstellt werden", str(error))
-            return None
+        vrf = self.nb.ipam.vrfs.create({
+            "name": vrf_name,
+            "tenant": tenant_id,
+            "enforce_unique": True,
+            "description": "Automatisch erstellt durch NetBox VM Import",
+        })
         self.vrfs.append(vrf)
-        self.log(f"VRF automatisch erstellt: {vrf_name}")
+        self.log(f"VRF erstellt: {vrf_name}")
         return vrf.id
 
     def sync_vm(self, source_vm, cluster_id, tenant_id, vrf_id):
@@ -1235,12 +1280,20 @@ class NetBoxVMImporter:
                         ),
                         key=lambda item: item.name.casefold(),
                     )
+                    tenant_name = next(
+                        (
+                            name for name, mapped_id in getattr(self, "tenant_map", {}).items()
+                            if mapped_id == tenant_id
+                        ),
+                        "Mandant",
+                    )
                     dialog = PrefixCreationDialog(
                         self.root,
                         address,
                         detected_prefix=prefix_is_detected,
                         vrfs=tenant_vrfs,
                         default_vrf_id=vrf_id,
+                        tenant_name=tenant_name,
                     )
                     self.prefix_decisions[cache_key] = dialog.result
                 decision = self.prefix_decisions[cache_key]
@@ -1249,6 +1302,12 @@ class NetBoxVMImporter:
                     return vrf_id
 
                 network = decision["network"]
+                if decision.get("create_vrf"):
+                    decision["vrf_id"] = self.get_or_create_tenant_vrf(
+                        decision["vrf_name"],
+                        tenant_id,
+                    )
+                    decision["create_vrf"] = False
                 vrf_id = decision["vrf_id"]
                 cache_key = (network, vrf_id)
                 selected_candidates = list(self.nb.ipam.prefixes.filter(prefix=network))
