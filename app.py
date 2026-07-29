@@ -864,9 +864,8 @@ class NetBoxVMImporter:
         payload = {
             "name": source_vm["name"], "cluster": cluster_id, "status": source_vm["status"],
             "vcpus": source_vm["vcpus"], "memory": source_vm["memory"], "disk": source_vm["disk"],
+            "tenant": tenant_id,
         }
-        if tenant_id:
-            payload["tenant"] = tenant_id
         platform_id = self.get_platform_id(source_vm.get("guest_os"))
         if platform_id:
             payload["platform"] = platform_id
@@ -900,14 +899,18 @@ class NetBoxVMImporter:
                     continue
                 ip_payload = {
                     "address": address, "status": "active",
+                    "tenant": tenant_id,
                     "assigned_object_type": "virtualization.vminterface",
                     "assigned_object_id": netbox_interface.id,
                 }
-                ip_object = self.nb.ipam.ip_addresses.get(address=address)
-                if ip_object:
-                    ip_object.update(ip_payload)
-                else:
-                    ip_object = self.nb.ipam.ip_addresses.create(ip_payload)
+                try:
+                    ip_object = self.nb.ipam.ip_addresses.get(address=address)
+                    if ip_object:
+                        ip_object.update(ip_payload)
+                    else:
+                        ip_object = self.nb.ipam.ip_addresses.create(ip_payload)
+                except Exception as error:
+                    raise RuntimeError(f"IP-Adresse {address}: {error}") from error
                 version = ipaddress.ip_interface(address).version
                 if version == 4 and not primary_ipv4:
                     primary_ipv4 = ip_object.id
