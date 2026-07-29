@@ -175,6 +175,91 @@ class TenantConfirmationDialog(tk.Toplevel):
         self.destroy()
 
 
+class PrefixCreationDialog(tk.Toplevel):
+    """Ask explicitly before creating a missing IPv4 or IPv6 prefix."""
+
+    def __init__(self, parent, address, detected_prefix=True):
+        super().__init__(parent)
+        self.title("Subnetz anlegen?")
+        self.geometry("520x320")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self.result = None
+
+        interface = ipaddress.ip_interface(address)
+        self.host_address = interface.ip
+        if interface.version == 4:
+            self.choices = [f"/{length}" for length in range(8, 25)]
+            default_length = max(8, min(interface.network.prefixlen, 24))
+        else:
+            common = [32, 40, 48, 52, 56, 60, 64, 80, 96, 112, 120, 124, 126, 127, 128]
+            if interface.network.prefixlen not in common:
+                common.append(interface.network.prefixlen)
+            self.choices = [f"/{length}" for length in sorted(set(common))]
+            default_length = interface.network.prefixlen
+        self.prefix_length = tk.StringVar(value=f"/{default_length}")
+        self.preview_text = tk.StringVar()
+
+        body = ttk.Frame(self, padding=22)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="Fehlendes Präfix", font=("Segoe UI Semibold", 14)).pack(anchor="w")
+        source_text = "vom Hypervisor erkannt" if detected_prefix else "aus der IP-Adresse geschätzt"
+        ttk.Label(
+            body,
+            text=(
+                f"IP-Adresse: {self.host_address}\n"
+                f"Präfixlänge: {source_text}\n\n"
+                "NetBox enthält noch kein exakt passendes Präfix. Bitte die gewünschte Subnetzgröße auswählen."
+            ),
+            wraplength=470,
+            justify="left",
+        ).pack(anchor="w", pady=(8, 14))
+
+        row = ttk.Frame(body)
+        row.pack(fill="x")
+        ttk.Label(row, text="Subnetzgröße").pack(side="left")
+        combo = ttk.Combobox(row, textvariable=self.prefix_length, values=self.choices, state="readonly", width=10)
+        combo.pack(side="left", padx=(12, 0))
+        combo.bind("<<ComboboxSelected>>", self.update_preview)
+        ttk.Label(body, textvariable=self.preview_text, foreground="#334e68", font=("Segoe UI Semibold", 10)).pack(
+            anchor="w", pady=(14, 0)
+        )
+        if interface.version == 4:
+            ttk.Label(
+                body,
+                text="IPv4-Präfixe werden als kanonische Netzadresse mit .0 am Ende angelegt.",
+                foreground="#52606d",
+            ).pack(anchor="w", pady=(6, 0))
+
+        buttons = ttk.Frame(body)
+        buttons.pack(anchor="e", pady=(22, 0))
+        ttk.Button(buttons, text="Nicht anlegen", command=self.destroy).pack(side="left", padx=4)
+        ttk.Button(buttons, text="Präfix anlegen", command=self.accept, style="Primary.TButton").pack(side="left", padx=4)
+        self.update_preview()
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.wait_window(self)
+
+    def selected_network(self):
+        length = int(self.prefix_length.get().lstrip("/"))
+        return ipaddress.ip_network(f"{self.host_address}/{length}", strict=False)
+
+    def update_preview(self, _event=None):
+        self.preview_text.set(f"Wird angelegt: {self.selected_network()}")
+
+    def accept(self):
+        network = self.selected_network()
+        if network.version == 4 and str(network.network_address).split(".")[-1] != "0":
+            messagebox.showerror(
+                "Ungültige Netzadresse",
+                "Das IPv4-Präfix muss mit einer .0-Netzadresse beginnen.",
+                parent=self,
+            )
+            return
+        self.result = str(network)
+        self.destroy()
+
+
 class NetBoxVMImporter:
     def __init__(self, root):
         self.root = root
@@ -621,7 +706,7 @@ class NetBoxVMImporter:
             mac = getattr(net, "macAddress", None)
             if not mac:
                 continue
-            ips = [ip for ip in (getattr(net, "ipAddress", None) or []) if self.valid_guest_ip(ip)]
+            ips = self.vmware_guest_ips(net)
             interfaces.append({"name": getattr(net, "device", None) or f"NIC-{index}", "mac": mac, "ips": ips})
         return {
             "name": properties["name"],
@@ -635,6 +720,29 @@ class NetBoxVMImporter:
             "guest_os": properties.get("config.guestFullName", "") or "",
             "interfaces": interfaces,
         }
+
+    def vmware_guest_ips(self, net):
+        """Prefer VMware-reported prefix lengths and retain legacy IP fallback."""
+        ips = []
+        ip_config = getattr(net, "ipConfig", None)
+        for entry in (getattr(ip_config, "ipAddress", None) or []):
+            value = getattr(entry, "ipAddress", None)
+            prefix = getattr(entry, "prefixLength", None)
+            if value and self.valid_guest_ip(value):
+                ips.append(f"{value}/{prefix}" if prefix is not None else value)
+
+        known_addresses = {
+            str(ipaddress.ip_interface(value).ip if "/" in value else ipaddress.ip_address(value))
+            for value in ips
+        }
+        for value in (getattr(net, "ipAddress", None) or []):
+            if not self.valid_guest_ip(value):
+                continue
+            normalized = str(ipaddress.ip_address(value))
+            if normalized not in known_addresses:
+                ips.append(value)
+                known_addresses.add(normalized)
+        return ips
 
     def proxmox_session(self, source):
         session = requests.Session()
@@ -845,6 +953,8 @@ class NetBoxVMImporter:
         tenant_id = self.tenant_map[tenant_name]
         self.tenant_combo.set(tenant_name)
         self.log(f"Mandant bestätigt: {tenant_name}")
+        self.synced_prefixes = set()
+        self.prefix_decisions = {}
         failures = []
         for item_id in selected:
             vm_data = self.vms[int(item_id)]
@@ -911,6 +1021,12 @@ class NetBoxVMImporter:
                         ip_object = self.nb.ipam.ip_addresses.create(ip_payload)
                 except Exception as error:
                     raise RuntimeError(f"IP-Adresse {address}: {error}") from error
+                self.sync_prefix_tenant(
+                    address,
+                    tenant_id,
+                    prefix_is_detected="/" in ip_value,
+                    ip_object=ip_object,
+                )
                 version = ipaddress.ip_interface(address).version
                 if version == 4 and not primary_ipv4:
                     primary_ipv4 = ip_object.id
@@ -924,6 +1040,78 @@ class NetBoxVMImporter:
             primary["primary_ip6"] = primary_ipv6
         if primary:
             netbox_vm.update(primary)
+
+    def sync_prefix_tenant(self, address, tenant_id, prefix_is_detected, ip_object=None):
+        """Assign a tenant and ask explicitly before creating a missing prefix."""
+        if not hasattr(self, "synced_prefixes"):
+            self.synced_prefixes = set()
+        if not hasattr(self, "prefix_decisions"):
+            self.prefix_decisions = {}
+        parsed_interface = ipaddress.ip_interface(address)
+        host_address = parsed_interface.ip
+        network = str(parsed_interface.network)
+        ip_vrf = getattr(ip_object, "vrf", None) if ip_object else None
+        vrf_id = getattr(ip_vrf, "id", None) if ip_vrf else None
+
+        for cached_network, cached_vrf in self.synced_prefixes:
+            if cached_vrf == vrf_id and host_address in ipaddress.ip_network(cached_network):
+                return
+
+        cache_key = (network, vrf_id)
+        candidates = list(self.nb.ipam.prefixes.filter(prefix=network))
+        if vrf_id is not None:
+            candidates = [
+                prefix for prefix in candidates
+                if getattr(getattr(prefix, "vrf", None), "id", None) == vrf_id
+            ]
+
+        if len(candidates) > 1:
+            self.log(
+                f"Präfix {network} nicht geändert: mehrere passende VRFs gefunden"
+            )
+            return
+
+        try:
+            if candidates:
+                candidates[0].update({"tenant": tenant_id})
+                self.log(f"Mandant am Präfix aktualisiert: {network}")
+            else:
+                if cache_key not in self.prefix_decisions:
+                    dialog = PrefixCreationDialog(
+                        self.root,
+                        address,
+                        detected_prefix=prefix_is_detected,
+                    )
+                    self.prefix_decisions[cache_key] = dialog.result
+                selected_network = self.prefix_decisions[cache_key]
+                if selected_network is None:
+                    self.log(f"Präfix für {host_address} nicht angelegt (Benutzerauswahl)")
+                    return
+
+                network = selected_network
+                cache_key = (network, vrf_id)
+                selected_candidates = list(self.nb.ipam.prefixes.filter(prefix=network))
+                if vrf_id is not None:
+                    selected_candidates = [
+                        prefix for prefix in selected_candidates
+                        if getattr(getattr(prefix, "vrf", None), "id", None) == vrf_id
+                    ]
+                if len(selected_candidates) > 1:
+                    self.log(f"Präfix {network} nicht geändert: mehrere passende VRFs gefunden")
+                    return
+                if selected_candidates:
+                    selected_candidates[0].update({"tenant": tenant_id})
+                    self.log(f"Mandant am Präfix aktualisiert: {network}")
+                else:
+                    prefix_payload = {"prefix": network, "status": "active", "tenant": tenant_id}
+                    if vrf_id is not None:
+                        prefix_payload["vrf"] = vrf_id
+                    self.nb.ipam.prefixes.create(prefix_payload)
+                    self.log(f"Präfix nach Bestätigung erstellt: {network}")
+        except Exception as error:
+            raise RuntimeError(f"Präfix {network}: {error}") from error
+
+        self.synced_prefixes.add(cache_key)
 
 
 if __name__ == "__main__":
