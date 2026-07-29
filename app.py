@@ -175,6 +175,61 @@ class TenantConfirmationDialog(tk.Toplevel):
         self.destroy()
 
 
+class VRFSelectionDialog(tk.Toplevel):
+    """Select a tenant VRF or request automatic creation."""
+
+    AUTO_CREATE = "➕ Neue VRF automatisch erstellen"
+
+    def __init__(self, parent, tenant_name, cluster_name, vrfs):
+        super().__init__(parent)
+        self.title("VRF auswählen")
+        self.geometry("540x285")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self.result = None
+        self.vrf_map = {}
+
+        values = []
+        for vrf in vrfs:
+            rd = getattr(vrf, "rd", None)
+            display = f"{vrf.name} (RD: {rd})" if rd else vrf.name
+            self.vrf_map[display] = vrf.id
+            values.append(display)
+        values.append(self.AUTO_CREATE)
+        default = values[0] if vrfs else self.AUTO_CREATE
+        self.selection = tk.StringVar(value=default)
+
+        body = ttk.Frame(self, padding=22)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="VRF für IP-Adressen", font=("Segoe UI Semibold", 14)).pack(anchor="w")
+        ttk.Label(
+            body,
+            text=(
+                f"Mandant: {tenant_name}\nCluster: {cluster_name}\n\n"
+                "Bitte eine vorhandene VRF dieses Mandanten auswählen oder automatisch eine neue VRF erstellen lassen."
+            ),
+            wraplength=490,
+            justify="left",
+        ).pack(anchor="w", pady=(8, 14))
+        ttk.Combobox(body, textvariable=self.selection, values=values, state="readonly").pack(fill="x")
+
+        buttons = ttk.Frame(body)
+        buttons.pack(anchor="e", pady=(22, 0))
+        ttk.Button(buttons, text="Abbrechen", command=self.destroy).pack(side="left", padx=4)
+        ttk.Button(buttons, text="VRF bestätigen", command=self.accept, style="Primary.TButton").pack(side="left", padx=4)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.wait_window(self)
+
+    def accept(self):
+        selected = self.selection.get()
+        if selected == self.AUTO_CREATE:
+            self.result = {"create": True, "id": None}
+        else:
+            self.result = {"create": False, "id": self.vrf_map[selected]}
+        self.destroy()
+
+
 class PrefixCreationDialog(tk.Toplevel):
     """Ask explicitly before creating a missing IPv4 or IPv6 prefix."""
 
@@ -274,6 +329,7 @@ class NetBoxVMImporter:
         self.cluster_map = {}
         self.cluster_tenants = {}
         self.tenant_map = {}
+        self.vrfs = []
         self.platforms = []
         self.profile_name = tk.StringVar()
         self.netbox_ignore_ssl = tk.BooleanVar(value=False)
@@ -613,6 +669,7 @@ class NetBoxVMImporter:
         self.log("Lade NetBox-Zieldaten …")
         clusters = list(self.nb.virtualization.clusters.all())
         tenants = list(self.nb.tenancy.tenants.all())
+        self.vrfs = list(self.nb.ipam.vrfs.all())
         self.cluster_map = {item.name: item.id for item in clusters}
         self.tenant_map = {item.name: item.id for item in tenants}
         self.cluster_tenants = {}
@@ -953,13 +1010,17 @@ class NetBoxVMImporter:
         tenant_id = self.tenant_map[tenant_name]
         self.tenant_combo.set(tenant_name)
         self.log(f"Mandant bestätigt: {tenant_name}")
+        vrf_id = self.select_or_create_vrf(tenant_name, tenant_id, cluster_name)
+        if vrf_id is None:
+            self.log("Synchronisierung ohne VRF-Auswahl abgebrochen")
+            return
         self.synced_prefixes = set()
         self.prefix_decisions = {}
         failures = []
         for item_id in selected:
             vm_data = self.vms[int(item_id)]
             try:
-                self.sync_vm(vm_data, cluster_id, tenant_id)
+                self.sync_vm(vm_data, cluster_id, tenant_id, vrf_id)
             except Exception as error:
                 failures.append(f"{vm_data['name']}: {error}")
                 self.log(f"FEHLER {vm_data['name']}: {error}")
@@ -969,7 +1030,53 @@ class NetBoxVMImporter:
             messagebox.showinfo("Fertig", "VM-Import und Synchronisierung abgeschlossen.")
         self.log("Synchronisierung abgeschlossen")
 
-    def sync_vm(self, source_vm, cluster_id, tenant_id):
+    def select_or_create_vrf(self, tenant_name, tenant_id, cluster_name):
+        tenant_vrfs = [
+            vrf for vrf in self.vrfs
+            if getattr(getattr(vrf, "tenant", None), "id", None) == tenant_id
+        ]
+        dialog = VRFSelectionDialog(
+            self.root,
+            tenant_name,
+            cluster_name,
+            sorted(tenant_vrfs, key=lambda item: item.name.casefold()),
+        )
+        if dialog.result is None:
+            return None
+        if not dialog.result["create"]:
+            vrf_id = dialog.result["id"]
+            selected = next(vrf for vrf in tenant_vrfs if vrf.id == vrf_id)
+            self.log(f"Vorhandene VRF ausgewählt: {selected.name}")
+            return vrf_id
+
+        vrf_name = f"{tenant_name} - {cluster_name}"
+        existing = next(
+            (
+                vrf for vrf in self.vrfs
+                if vrf.name == vrf_name
+                and getattr(getattr(vrf, "tenant", None), "id", None) == tenant_id
+            ),
+            None,
+        )
+        if existing:
+            self.log(f"Vorhandene automatisch benannte VRF verwendet: {vrf_name}")
+            return existing.id
+
+        try:
+            vrf = self.nb.ipam.vrfs.create({
+                "name": vrf_name,
+                "tenant": tenant_id,
+                "enforce_unique": True,
+                "description": "Automatisch erstellt durch NetBox VM Import",
+            })
+        except Exception as error:
+            messagebox.showerror("VRF konnte nicht erstellt werden", str(error))
+            return None
+        self.vrfs.append(vrf)
+        self.log(f"VRF automatisch erstellt: {vrf_name}")
+        return vrf.id
+
+    def sync_vm(self, source_vm, cluster_id, tenant_id, vrf_id):
         self.log(f"Synchronisiere {source_vm['name']} ({source_vm['source']}) …")
         payload = {
             "name": source_vm["name"], "cluster": cluster_id, "status": source_vm["status"],
@@ -1010,11 +1117,16 @@ class NetBoxVMImporter:
                 ip_payload = {
                     "address": address, "status": "active",
                     "tenant": tenant_id,
+                    "vrf": vrf_id,
                     "assigned_object_type": "virtualization.vminterface",
                     "assigned_object_id": netbox_interface.id,
                 }
                 try:
-                    ip_object = self.nb.ipam.ip_addresses.get(address=address)
+                    host_address = str(ipaddress.ip_interface(address).ip)
+                    ip_object = self.nb.ipam.ip_addresses.get(
+                        address=host_address,
+                        vrf_id=vrf_id,
+                    )
                     if ip_object:
                         ip_object.update(ip_payload)
                     else:
