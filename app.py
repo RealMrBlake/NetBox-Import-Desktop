@@ -183,7 +183,7 @@ class VRFSelectionDialog(tk.Toplevel):
     def __init__(self, parent, tenant_name, cluster_name, vrfs):
         super().__init__(parent)
         self.title("VRF auswählen")
-        self.geometry("540x285")
+        self.geometry("540x355")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -199,6 +199,7 @@ class VRFSelectionDialog(tk.Toplevel):
         values.append(self.AUTO_CREATE)
         default = values[0] if vrfs else self.AUTO_CREATE
         self.selection = tk.StringVar(value=default)
+        self.new_vrf_name = tk.StringVar(value=f"{tenant_name} - {cluster_name}")
 
         body = ttk.Frame(self, padding=22)
         body.pack(fill="both", expand=True)
@@ -213,6 +214,8 @@ class VRFSelectionDialog(tk.Toplevel):
             justify="left",
         ).pack(anchor="w", pady=(8, 14))
         ttk.Combobox(body, textvariable=self.selection, values=values, state="readonly").pack(fill="x")
+        ttk.Label(body, text="Name bei automatischer Erstellung").pack(anchor="w", pady=(14, 4))
+        ttk.Entry(body, textvariable=self.new_vrf_name).pack(fill="x")
 
         buttons = ttk.Frame(body)
         buttons.pack(anchor="e", pady=(22, 0))
@@ -224,23 +227,40 @@ class VRFSelectionDialog(tk.Toplevel):
     def accept(self):
         selected = self.selection.get()
         if selected == self.AUTO_CREATE:
-            self.result = {"create": True, "id": None}
+            vrf_name = self.new_vrf_name.get().strip()
+            if not vrf_name:
+                messagebox.showwarning("VRF-Name fehlt", "Bitte einen Namen für die neue VRF eingeben.", parent=self)
+                return
+            self.result = {"create": True, "id": None, "name": vrf_name}
         else:
-            self.result = {"create": False, "id": self.vrf_map[selected]}
+            self.result = {"create": False, "id": self.vrf_map[selected], "name": None}
         self.destroy()
 
 
 class PrefixCreationDialog(tk.Toplevel):
     """Ask explicitly before creating a missing IPv4 or IPv6 prefix."""
 
-    def __init__(self, parent, address, detected_prefix=True):
+    def __init__(self, parent, address, detected_prefix=True, vrfs=None, default_vrf_id=None):
         super().__init__(parent)
         self.title("Subnetz anlegen?")
-        self.geometry("520x320")
+        self.geometry("560x390")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
         self.result = None
+        self.vrf_map = {}
+
+        vrf_values = []
+        for vrf in vrfs or []:
+            rd = getattr(vrf, "rd", None)
+            display = f"{vrf.name} (RD: {rd})" if rd else vrf.name
+            self.vrf_map[display] = vrf.id
+            vrf_values.append(display)
+        default_vrf = next(
+            (display for display, vrf_id in self.vrf_map.items() if vrf_id == default_vrf_id),
+            vrf_values[0] if vrf_values else "",
+        )
+        self.vrf_selection = tk.StringVar(value=default_vrf)
 
         interface = ipaddress.ip_interface(address)
         self.host_address = interface.ip
@@ -277,6 +297,18 @@ class PrefixCreationDialog(tk.Toplevel):
         combo = ttk.Combobox(row, textvariable=self.prefix_length, values=self.choices, state="readonly", width=10)
         combo.pack(side="left", padx=(12, 0))
         combo.bind("<<ComboboxSelected>>", self.update_preview)
+
+        vrf_row = ttk.Frame(body)
+        vrf_row.pack(fill="x", pady=(12, 0))
+        ttk.Label(vrf_row, text="VRF").pack(side="left")
+        vrf_combo = ttk.Combobox(
+            vrf_row,
+            textvariable=self.vrf_selection,
+            values=vrf_values,
+            state="readonly",
+        )
+        vrf_combo.pack(side="left", fill="x", expand=True, padx=(12, 0))
+        vrf_combo.bind("<<ComboboxSelected>>", self.update_preview)
         ttk.Label(body, textvariable=self.preview_text, foreground="#334e68", font=("Segoe UI Semibold", 10)).pack(
             anchor="w", pady=(14, 0)
         )
@@ -300,10 +332,15 @@ class PrefixCreationDialog(tk.Toplevel):
         return ipaddress.ip_network(f"{self.host_address}/{length}", strict=False)
 
     def update_preview(self, _event=None):
-        self.preview_text.set(f"Wird angelegt: {self.selected_network()}")
+        vrf_name = self.vrf_selection.get() or "keine VRF"
+        self.preview_text.set(f"Wird angelegt: {self.selected_network()} · VRF: {vrf_name}")
 
     def accept(self):
         network = self.selected_network()
+        selected_vrf = self.vrf_selection.get()
+        if selected_vrf not in self.vrf_map:
+            messagebox.showwarning("VRF fehlt", "Bitte eine VRF für das Präfix auswählen.", parent=self)
+            return
         if network.version == 4 and str(network.network_address).split(".")[-1] != "0":
             messagebox.showerror(
                 "Ungültige Netzadresse",
@@ -311,7 +348,7 @@ class PrefixCreationDialog(tk.Toplevel):
                 parent=self,
             )
             return
-        self.result = str(network)
+        self.result = {"network": str(network), "vrf_id": self.vrf_map[selected_vrf]}
         self.destroy()
 
 
@@ -1049,7 +1086,7 @@ class NetBoxVMImporter:
             self.log(f"Vorhandene VRF ausgewählt: {selected.name}")
             return vrf_id
 
-        vrf_name = f"{tenant_name} - {cluster_name}"
+        vrf_name = dialog.result["name"]
         existing = next(
             (
                 vrf for vrf in self.vrfs
@@ -1114,10 +1151,16 @@ class NetBoxVMImporter:
                 address = self.ip_with_prefix(ip_value)
                 if not address:
                     continue
+                effective_vrf_id = self.sync_prefix_tenant(
+                    address,
+                    tenant_id,
+                    prefix_is_detected="/" in ip_value,
+                    default_vrf_id=vrf_id,
+                )
                 ip_payload = {
                     "address": address, "status": "active",
                     "tenant": tenant_id,
-                    "vrf": vrf_id,
+                    "vrf": effective_vrf_id,
                     "assigned_object_type": "virtualization.vminterface",
                     "assigned_object_id": netbox_interface.id,
                 }
@@ -1125,7 +1168,7 @@ class NetBoxVMImporter:
                     host_address = str(ipaddress.ip_interface(address).ip)
                     ip_object = self.nb.ipam.ip_addresses.get(
                         address=host_address,
-                        vrf_id=vrf_id,
+                        vrf_id=effective_vrf_id,
                     )
                     if ip_object:
                         ip_object.update(ip_payload)
@@ -1133,12 +1176,6 @@ class NetBoxVMImporter:
                         ip_object = self.nb.ipam.ip_addresses.create(ip_payload)
                 except Exception as error:
                     raise RuntimeError(f"IP-Adresse {address}: {error}") from error
-                self.sync_prefix_tenant(
-                    address,
-                    tenant_id,
-                    prefix_is_detected="/" in ip_value,
-                    ip_object=ip_object,
-                )
                 version = ipaddress.ip_interface(address).version
                 if version == 4 and not primary_ipv4:
                     primary_ipv4 = ip_object.id
@@ -1153,8 +1190,8 @@ class NetBoxVMImporter:
         if primary:
             netbox_vm.update(primary)
 
-    def sync_prefix_tenant(self, address, tenant_id, prefix_is_detected, ip_object=None):
-        """Assign a tenant and ask explicitly before creating a missing prefix."""
+    def sync_prefix_tenant(self, address, tenant_id, prefix_is_detected, default_vrf_id):
+        """Assign a tenant, choose a VRF, and ask before creating a missing prefix."""
         if not hasattr(self, "synced_prefixes"):
             self.synced_prefixes = set()
         if not hasattr(self, "prefix_decisions"):
@@ -1162,55 +1199,66 @@ class NetBoxVMImporter:
         parsed_interface = ipaddress.ip_interface(address)
         host_address = parsed_interface.ip
         network = str(parsed_interface.network)
-        ip_vrf = getattr(ip_object, "vrf", None) if ip_object else None
-        vrf_id = getattr(ip_vrf, "id", None) if ip_vrf else None
+        vrf_id = default_vrf_id
 
         for cached_network, cached_vrf in self.synced_prefixes:
-            if cached_vrf == vrf_id and host_address in ipaddress.ip_network(cached_network):
-                return
+            if host_address in ipaddress.ip_network(cached_network):
+                return cached_vrf
 
         cache_key = (network, vrf_id)
         candidates = list(self.nb.ipam.prefixes.filter(prefix=network))
-        if vrf_id is not None:
-            candidates = [
-                prefix for prefix in candidates
-                if getattr(getattr(prefix, "vrf", None), "id", None) == vrf_id
-            ]
+        candidates = [
+            prefix for prefix in candidates
+            if getattr(getattr(prefix, "vrf", None), "id", None) == vrf_id
+        ]
 
         if len(candidates) > 1:
             self.log(
                 f"Präfix {network} nicht geändert: mehrere passende VRFs gefunden"
             )
-            return
+            return vrf_id
 
         try:
             if candidates:
                 candidates[0].update({"tenant": tenant_id})
                 self.log(f"Mandant am Präfix aktualisiert: {network}")
             else:
-                if cache_key not in self.prefix_decisions:
+                decision = self.prefix_decisions.get(cache_key)
+                needs_decision = cache_key not in self.prefix_decisions
+                if decision is not None and host_address not in ipaddress.ip_network(decision["network"]):
+                    needs_decision = True
+                if needs_decision:
+                    tenant_vrfs = sorted(
+                        (
+                            vrf for vrf in self.vrfs
+                            if getattr(getattr(vrf, "tenant", None), "id", None) == tenant_id
+                        ),
+                        key=lambda item: item.name.casefold(),
+                    )
                     dialog = PrefixCreationDialog(
                         self.root,
                         address,
                         detected_prefix=prefix_is_detected,
+                        vrfs=tenant_vrfs,
+                        default_vrf_id=vrf_id,
                     )
                     self.prefix_decisions[cache_key] = dialog.result
-                selected_network = self.prefix_decisions[cache_key]
-                if selected_network is None:
+                decision = self.prefix_decisions[cache_key]
+                if decision is None:
                     self.log(f"Präfix für {host_address} nicht angelegt (Benutzerauswahl)")
-                    return
+                    return vrf_id
 
-                network = selected_network
+                network = decision["network"]
+                vrf_id = decision["vrf_id"]
                 cache_key = (network, vrf_id)
                 selected_candidates = list(self.nb.ipam.prefixes.filter(prefix=network))
-                if vrf_id is not None:
-                    selected_candidates = [
-                        prefix for prefix in selected_candidates
-                        if getattr(getattr(prefix, "vrf", None), "id", None) == vrf_id
-                    ]
+                selected_candidates = [
+                    prefix for prefix in selected_candidates
+                    if getattr(getattr(prefix, "vrf", None), "id", None) == vrf_id
+                ]
                 if len(selected_candidates) > 1:
                     self.log(f"Präfix {network} nicht geändert: mehrere passende VRFs gefunden")
-                    return
+                    return vrf_id
                 if selected_candidates:
                     selected_candidates[0].update({"tenant": tenant_id})
                     self.log(f"Mandant am Präfix aktualisiert: {network}")
@@ -1224,6 +1272,7 @@ class NetBoxVMImporter:
             raise RuntimeError(f"Präfix {network}: {error}") from error
 
         self.synced_prefixes.add(cache_key)
+        return vrf_id
 
 
 if __name__ == "__main__":
