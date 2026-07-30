@@ -11,6 +11,8 @@ Windows-Desktopanwendung zum Importieren und Synchronisieren virtueller Maschine
 - Mandantenzuweisung für IPv4-/IPv6-Adressen und erkannte NetBox-Präfixe
 - Bestätigungsdialog mit Subnetzgrößen- und vorausgefüllter VRF-Auswahl sowie optionaler VRF-Erstellung
 - Auswahl vorhandener Mandanten-VRFs oder automatische VRF-Erstellung pro Cluster mit frei wählbarem Namen
+- Eigenes Fenster zur Stapelanlage mehrerer VRFs und Netzwerke pro Mandant
+- Wiederverwendung bereits vorhandener, zur IP passender Präfixe bei erneuten Imports
 - Optionale Unterstützung selbstsignierter TLS-Zertifikate
 - Synchronisierung von VMs, Hardwaredaten, Interfaces und IP-Adressen
 - Übernahme primärer IPv4- und IPv6-Adressen

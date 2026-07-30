@@ -394,6 +394,143 @@ class PrefixCreationDialog(tk.Toplevel):
         self.destroy()
 
 
+class NetworkManagementDialog(tk.Toplevel):
+    """Create multiple tenant VRFs and prefixes in one dedicated window."""
+
+    def __init__(self, parent, importer, default_tenant=""):
+        super().__init__(parent)
+        self.importer = importer
+        self.title("VRFs & Netzwerke")
+        self.geometry("720x650")
+        self.minsize(650, 590)
+        self.transient(parent)
+        self.grab_set()
+        self.tenant_name = tk.StringVar(value=default_tenant)
+        self.vrf_selection = tk.StringVar()
+        self.vrf_map = {}
+        self.status_text = tk.StringVar(value="Bereit")
+
+        body = ttk.Frame(self, padding=22)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="VRFs & Netzwerke", font=("Segoe UI Semibold", 16)).pack(anchor="w")
+        ttk.Label(
+            body,
+            text="Mehrere Einträge jeweils zeilenweise erfassen und gesammelt in NetBox anlegen.",
+            foreground="#52606d",
+        ).pack(anchor="w", pady=(4, 16))
+
+        tenant_row = ttk.Frame(body)
+        tenant_row.pack(fill="x")
+        ttk.Label(tenant_row, text="Mandant", width=14).pack(side="left")
+        tenant_combo = ttk.Combobox(
+            tenant_row,
+            textvariable=self.tenant_name,
+            values=sorted(importer.tenant_map, key=str.casefold),
+            state="readonly",
+        )
+        tenant_combo.pack(side="left", fill="x", expand=True)
+        tenant_combo.bind("<<ComboboxSelected>>", self.refresh_vrfs)
+
+        vrf_box = ttk.LabelFrame(body, text="Mehrere VRFs anlegen", padding=12)
+        vrf_box.pack(fill="both", expand=True, pady=(16, 10))
+        ttk.Label(vrf_box, text="Ein VRF-Name pro Zeile:").pack(anchor="w")
+        self.vrf_names = tk.Text(vrf_box, height=6, font=("Segoe UI", 10))
+        self.vrf_names.pack(fill="both", expand=True, pady=(6, 10))
+        ttk.Button(vrf_box, text="Alle VRFs anlegen", command=self.create_vrfs, style="Primary.TButton").pack(
+            anchor="e"
+        )
+
+        prefix_box = ttk.LabelFrame(body, text="Mehrere Netzwerke anlegen", padding=12)
+        prefix_box.pack(fill="both", expand=True, pady=(0, 10))
+        vrf_row = ttk.Frame(prefix_box)
+        vrf_row.pack(fill="x")
+        ttk.Label(vrf_row, text="Ziel-VRF", width=14).pack(side="left")
+        self.vrf_combo = ttk.Combobox(vrf_row, textvariable=self.vrf_selection, state="readonly")
+        self.vrf_combo.pack(side="left", fill="x", expand=True)
+        ttk.Label(prefix_box, text="Ein Präfix pro Zeile, z. B. 10.10.100.0/24:").pack(anchor="w", pady=(12, 0))
+        self.prefixes = tk.Text(prefix_box, height=6, font=("Consolas", 10))
+        self.prefixes.pack(fill="both", expand=True, pady=(6, 10))
+        ttk.Button(
+            prefix_box,
+            text="Alle Netzwerke anlegen",
+            command=self.create_prefixes,
+            style="Primary.TButton",
+        ).pack(anchor="e")
+
+        footer = ttk.Frame(body)
+        footer.pack(fill="x", pady=(4, 0))
+        ttk.Label(footer, textvariable=self.status_text, foreground="#334e68").pack(side="left")
+        ttk.Button(footer, text="Schließen", command=self.destroy).pack(side="right")
+
+        if not self.tenant_name.get() and importer.tenant_map:
+            self.tenant_name.set(sorted(importer.tenant_map, key=str.casefold)[0])
+        self.refresh_vrfs()
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.wait_window(self)
+
+    @staticmethod
+    def text_lines(widget):
+        return list(dict.fromkeys(line.strip() for line in widget.get("1.0", "end").splitlines() if line.strip()))
+
+    def refresh_vrfs(self, _event=None):
+        tenant_name = self.tenant_name.get()
+        tenant_id = self.importer.tenant_map.get(tenant_name)
+        vrfs = self.importer.tenant_vrfs(tenant_id) if tenant_id else []
+        self.vrf_map = {}
+        values = []
+        for vrf in vrfs:
+            rd = getattr(vrf, "rd", None)
+            display = f"{vrf.name} (RD: {rd})" if rd else vrf.name
+            self.vrf_map[display] = vrf.id
+            values.append(display)
+        self.vrf_combo["values"] = values
+        if self.vrf_selection.get() not in self.vrf_map:
+            self.vrf_selection.set(values[0] if values else "")
+
+    def create_vrfs(self):
+        names = self.text_lines(self.vrf_names)
+        tenant_name = self.tenant_name.get()
+        if not tenant_name or not names:
+            messagebox.showwarning("Angaben fehlen", "Bitte Mandant und mindestens einen VRF-Namen angeben.", parent=self)
+            return
+        created, reused, errors = self.importer.create_tenant_vrfs_batch(tenant_name, names)
+        self.status_text.set(f"VRFs: {created} angelegt, {reused} bereits vorhanden")
+        self.refresh_vrfs()
+        if not errors:
+            self.vrf_names.delete("1.0", "end")
+        else:
+            messagebox.showwarning("VRFs teilweise angelegt", "\n".join(errors), parent=self)
+
+    def create_prefixes(self):
+        networks = self.text_lines(self.prefixes)
+        tenant_name = self.tenant_name.get()
+        vrf_id = self.vrf_map.get(self.vrf_selection.get())
+        if not tenant_name or not vrf_id or not networks:
+            messagebox.showwarning(
+                "Angaben fehlen",
+                "Bitte Mandant, Ziel-VRF und mindestens ein Netzwerk angeben.",
+                parent=self,
+            )
+            return
+        created, reused, canonical, errors = self.importer.create_prefixes_batch(
+            tenant_name,
+            vrf_id,
+            networks,
+        )
+        self.status_text.set(f"Netzwerke: {created} angelegt, {reused} bereits vorhanden")
+        if canonical:
+            self.prefixes.delete("1.0", "end")
+            self.prefixes.insert("1.0", "\n".join(canonical))
+        if errors:
+            messagebox.showwarning("Netzwerke teilweise angelegt", "\n".join(errors), parent=self)
+        else:
+            messagebox.showinfo(
+                "Netzwerke verarbeitet",
+                f"{created} Netzwerk(e) angelegt, {reused} bereits vorhanden.",
+                parent=self,
+            )
+
+
 class NetBoxVMImporter:
     def __init__(self, root):
         self.root = root
@@ -526,6 +663,7 @@ class NetBoxVMImporter:
         buttons = ttk.Frame(main)
         buttons.grid(row=5, column=0, sticky="ew", pady=10)
         ttk.Button(buttons, text="Alle auswählen", command=self.select_all).pack(side="left")
+        ttk.Button(buttons, text="VRFs & Netzwerke", command=self.open_network_manager).pack(side="left", padx=8)
         ttk.Button(buttons, text="Import / Sync starten", command=self.import_vms, style="Primary.TButton").pack(side="right")
 
         log_card = ttk.LabelFrame(main, text="Aktivitätsprotokoll", style="Card.TLabelframe")
@@ -1110,10 +1248,7 @@ class NetBoxVMImporter:
         self.log("Synchronisierung abgeschlossen")
 
     def select_or_create_vrf(self, tenant_name, tenant_id, cluster_name):
-        tenant_vrfs = [
-            vrf for vrf in self.vrfs
-            if getattr(getattr(vrf, "tenant", None), "id", None) == tenant_id
-        ]
+        tenant_vrfs = self.tenant_vrfs(tenant_id)
         dialog = VRFSelectionDialog(
             self.root,
             tenant_name,
@@ -1134,6 +1269,82 @@ class NetBoxVMImporter:
         except Exception as error:
             messagebox.showerror("VRF konnte nicht erstellt werden", str(error))
             return None
+
+    def tenant_vrfs(self, tenant_id):
+        return sorted(
+            (
+                vrf for vrf in self.vrfs
+                if getattr(getattr(vrf, "tenant", None), "id", None) == tenant_id
+            ),
+            key=lambda item: item.name.casefold(),
+        )
+
+    def open_network_manager(self):
+        if self.nb is None or not self.tenant_map:
+            messagebox.showwarning(
+                "Keine NetBox-Verbindung",
+                "Bitte zuerst mit NetBox verbinden und die Daten laden.",
+                parent=self.root,
+            )
+            return
+        NetworkManagementDialog(self.root, self, self.tenant_combo.get())
+
+    def create_tenant_vrfs_batch(self, tenant_name, names):
+        tenant_id = self.tenant_map[tenant_name]
+        created = 0
+        reused = 0
+        errors = []
+        for name in names:
+            exists = any(vrf.name == name for vrf in self.tenant_vrfs(tenant_id))
+            try:
+                self.get_or_create_tenant_vrf(name, tenant_id)
+                if exists:
+                    reused += 1
+                else:
+                    created += 1
+            except Exception as error:
+                errors.append(f"{name}: {error}")
+                self.log(f"FEHLER VRF {name}: {error}")
+        return created, reused, errors
+
+    def find_prefixes_in_vrf(self, network, vrf_id):
+        return [
+            prefix for prefix in self.nb.ipam.prefixes.filter(prefix=str(network))
+            if getattr(getattr(prefix, "vrf", None), "id", None) == vrf_id
+        ]
+
+    def create_prefixes_batch(self, tenant_name, vrf_id, values):
+        tenant_id = self.tenant_map[tenant_name]
+        created = 0
+        reused = 0
+        canonical = []
+        errors = []
+        for value in values:
+            try:
+                network = ipaddress.ip_network(value, strict=False)
+                if network.version == 4 and str(network.network_address).split(".")[-1] != "0":
+                    raise ValueError("IPv4-Netzadresse muss mit .0 enden")
+                network_text = str(network)
+                candidates = self.find_prefixes_in_vrf(network_text, vrf_id)
+                if len(candidates) > 1:
+                    raise ValueError("mehrere identische Präfixe in dieser VRF gefunden")
+                if candidates:
+                    candidates[0].update({"tenant": tenant_id})
+                    reused += 1
+                else:
+                    self.nb.ipam.prefixes.create({
+                        "prefix": network_text,
+                        "status": "active",
+                        "tenant": tenant_id,
+                        "vrf": vrf_id,
+                    })
+                    created += 1
+                canonical.append(network_text)
+                self.log(f"Netzwerk verarbeitet: {network_text}")
+            except Exception as error:
+                errors.append(f"{value}: {error}")
+                self.log(f"FEHLER Netzwerk {value}: {error}")
+        return created, reused, canonical, errors
 
     def get_or_create_tenant_vrf(self, vrf_name, tenant_id):
         existing = next(
@@ -1235,6 +1446,27 @@ class NetBoxVMImporter:
         if primary:
             netbox_vm.update(primary)
 
+    def find_covering_prefixes(self, host_address, allowed_vrf_ids):
+        host = ipaddress.ip_address(host_address)
+        host_prefix = f"{host}/{host.max_prefixlen}"
+        try:
+            candidates = list(self.nb.ipam.prefixes.filter(contains_or_equals=host_prefix))
+        except Exception as error:
+            self.log(f"Hinweis: Präfixsuche für {host} nicht möglich: {error}")
+            return []
+        matches = []
+        for prefix in candidates:
+            prefix_vrf_id = getattr(getattr(prefix, "vrf", None), "id", None)
+            if prefix_vrf_id not in allowed_vrf_ids:
+                continue
+            try:
+                parsed = ipaddress.ip_network(str(prefix.prefix))
+            except ValueError:
+                continue
+            if host in parsed:
+                matches.append((parsed.prefixlen, prefix, str(parsed), prefix_vrf_id))
+        return matches
+
     def sync_prefix_tenant(self, address, tenant_id, prefix_is_detected, default_vrf_id):
         """Assign a tenant, choose a VRF, and ask before creating a missing prefix."""
         if not hasattr(self, "synced_prefixes"):
@@ -1251,11 +1483,7 @@ class NetBoxVMImporter:
                 return cached_vrf
 
         cache_key = (network, vrf_id)
-        candidates = list(self.nb.ipam.prefixes.filter(prefix=network))
-        candidates = [
-            prefix for prefix in candidates
-            if getattr(getattr(prefix, "vrf", None), "id", None) == vrf_id
-        ]
+        candidates = self.find_prefixes_in_vrf(network, vrf_id)
 
         if len(candidates) > 1:
             self.log(
@@ -1268,18 +1496,27 @@ class NetBoxVMImporter:
                 candidates[0].update({"tenant": tenant_id})
                 self.log(f"Mandant am Präfix aktualisiert: {network}")
             else:
+                tenant_vrf_ids = {vrf.id for vrf in self.tenant_vrfs(tenant_id)}
+                covering = self.find_covering_prefixes(host_address, tenant_vrf_ids)
+                default_matches = [item for item in covering if item[3] == vrf_id]
+                matching_vrfs = {item[3] for item in covering}
+                reusable = None
+                if default_matches:
+                    reusable = max(default_matches, key=lambda item: item[0])
+                elif len(matching_vrfs) == 1:
+                    reusable = max(covering, key=lambda item: item[0])
+                if reusable:
+                    _, existing_prefix, existing_network, existing_vrf_id = reusable
+                    existing_prefix.update({"tenant": tenant_id})
+                    self.synced_prefixes.add((existing_network, existing_vrf_id))
+                    self.log(f"Vorhandenes Netzwerk wiederverwendet: {existing_network}")
+                    return existing_vrf_id
                 decision = self.prefix_decisions.get(cache_key)
                 needs_decision = cache_key not in self.prefix_decisions
                 if decision is not None and host_address not in ipaddress.ip_network(decision["network"]):
                     needs_decision = True
                 if needs_decision:
-                    tenant_vrfs = sorted(
-                        (
-                            vrf for vrf in self.vrfs
-                            if getattr(getattr(vrf, "tenant", None), "id", None) == tenant_id
-                        ),
-                        key=lambda item: item.name.casefold(),
-                    )
+                    tenant_vrfs = self.tenant_vrfs(tenant_id)
                     tenant_name = next(
                         (
                             name for name, mapped_id in getattr(self, "tenant_map", {}).items()
@@ -1310,11 +1547,7 @@ class NetBoxVMImporter:
                     decision["create_vrf"] = False
                 vrf_id = decision["vrf_id"]
                 cache_key = (network, vrf_id)
-                selected_candidates = list(self.nb.ipam.prefixes.filter(prefix=network))
-                selected_candidates = [
-                    prefix for prefix in selected_candidates
-                    if getattr(getattr(prefix, "vrf", None), "id", None) == vrf_id
-                ]
+                selected_candidates = self.find_prefixes_in_vrf(network, vrf_id)
                 if len(selected_candidates) > 1:
                     self.log(f"Präfix {network} nicht geändert: mehrere passende VRFs gefunden")
                     return vrf_id
