@@ -18,6 +18,24 @@ COMMANDS = {
     "hpe_comware": ("screen-length disable", "display interface brief", "display lldp neighbor-information verbose"),
 }
 
+LLDP_CONTROL = {
+    "aruba_cx": {
+        "status": "show lldp configuration",
+        "disabled": r"LLDP Enabled\s*:\s*No",
+        "enable": ("configure terminal", "lldp", "end"),
+    },
+    "aruba_aos": {
+        "status": "show lldp config",
+        "disabled": r"LLDP (?:Enabled|Run)\s*:\s*(?:No|False)|LLDP operation.*disabled",
+        "enable": ("configure terminal", "lldp run", "exit"),
+    },
+    "hpe_comware": {
+        "status": "display lldp status",
+        "disabled": r"Global status of LLDP\s*:\s*Disable",
+        "enable": ("system-view", "lldp global enable", "return"),
+    },
+}
+
 ANSI_ESCAPE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 MAC_PATTERN = re.compile(r"(?i)\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b|\b[0-9a-f]{4}(?:-[0-9a-f]{4}){2}\b")
 
@@ -63,11 +81,42 @@ def run_switch_commands(config):
         )
         channel = client.invoke_shell(width=240, height=1000)
         _read_available(channel, timeout=3)
-        outputs = []
-        for command in COMMANDS[platform]:
-            channel.send(command + "\n")
-            outputs.append(_read_available(channel))
-        return {"interfaces": outputs[1], "neighbors": outputs[2]}
+        pager_command, interface_command, neighbor_command = COMMANDS[platform]
+        channel.send(pager_command + "\n")
+        _read_available(channel)
+
+        control = LLDP_CONTROL[platform]
+        channel.send(control["status"] + "\n")
+        lldp_status = _read_available(channel)
+        lldp_enabled_automatically = bool(re.search(control["disabled"], lldp_status, flags=re.I))
+        if lldp_enabled_automatically:
+            enable_output = []
+            for command in control["enable"]:
+                channel.send(command + "\n")
+                enable_output.append(_read_available(channel))
+            combined = "\n".join(enable_output)
+            if platform == "hpe_comware" and re.search(r"(?i)unrecognized|invalid|wrong parameter", combined):
+                channel.send("system-view\n")
+                _read_available(channel)
+                channel.send("lldp enable\n")
+                combined = _read_available(channel)
+                channel.send("return\n")
+                combined += "\n" + _read_available(channel)
+            if re.search(r"(?i)permission denied|authorization failed|access denied", combined):
+                raise PermissionError("LLDP konnte mangels Konfigurationsrechten nicht aktiviert werden.")
+            if re.search(r"(?i)unrecognized|invalid input|unknown command|wrong parameter", combined):
+                raise RuntimeError("Der LLDP-Aktivierungsbefehl wird von diesem Switch nicht unterstützt.")
+            time.sleep(2)
+
+        channel.send(interface_command + "\n")
+        interfaces = _read_available(channel)
+        channel.send(neighbor_command + "\n")
+        neighbors = _read_available(channel)
+        return {
+            "interfaces": interfaces,
+            "neighbors": neighbors,
+            "lldp_enabled_automatically": lldp_enabled_automatically,
+        }
     finally:
         client.close()
 
@@ -225,7 +274,12 @@ def discover_switch(config):
         local = interface_map.get(neighbor["local_port"].casefold())
         if local:
             local["neighbor"] = neighbor
-    return {"interfaces": interfaces, "neighbors": neighbors, "raw": outputs}
+    return {
+        "interfaces": interfaces,
+        "neighbors": neighbors,
+        "raw": outputs,
+        "lldp_enabled_automatically": outputs.get("lldp_enabled_automatically", False),
+    }
 
 
 def _netbox_interface_type(speed_mbps):

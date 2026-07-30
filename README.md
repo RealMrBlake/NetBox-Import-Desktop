@@ -20,6 +20,8 @@ Windows-Desktopanwendung zum Synchronisieren virtueller Maschinen sowie HPE-/Aru
 - Gemeinsame, synchronisierte Kundenprofil- und NetBox-Zielansicht in beiden Tabs
 - Verschlüsselte SSH-Zugänge pro bestehendem NetBox-Switch
 - SSH-Erkennung für Aruba CX, ArubaOS-Switch/ProCurve und HPE Comware
+- Durchsuchbare, nach Mandant filterbare Auswahl vorhandener NetBox-Geräte
+- Automatische Aktivierung von global deaktiviertem LLDP auf unterstützten Switches
 - Synchronisierung von Switch-Schnittstellen und optionalen LLDP-Verbindungen als NetBox-Kabel
 
 ## Verwendung

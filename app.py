@@ -141,7 +141,7 @@ class SwitchSourceDialog(tk.Toplevel):
     def __init__(self, parent, devices, switch=None):
         super().__init__(parent)
         self.title("Switch-Zugang")
-        self.geometry("560x500")
+        self.geometry("620x560")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -151,30 +151,54 @@ class SwitchSourceDialog(tk.Toplevel):
         self.enabled = tk.BooleanVar(value=switch.get("enabled", True))
         self.platform = tk.StringVar(value=switch.get("platform", "aruba_cx"))
         self.device_map = {}
+        self.device_options = []
 
-        device_values = []
         selected_device = ""
+        selected_tenant = "Alle Mandanten"
         for device in devices:
             site = getattr(getattr(device, "site", None), "name", "")
-            display = f"{device.name} · {site}" if site else device.name
+            tenant = getattr(getattr(device, "tenant", None), "name", "") or "Ohne Mandant"
+            parts = [device.name]
+            if site:
+                parts.append(site)
+            parts.append(tenant)
+            display = " · ".join(parts)
+            option = {
+                "display": display,
+                "device_id": device.id,
+                "device_name": device.name,
+                "tenant": tenant,
+            }
+            self.device_options.append(option)
             self.device_map[display] = (device.id, device.name)
-            device_values.append(display)
             if device.id == switch.get("device_id"):
                 selected_device = display
+                selected_tenant = tenant
 
         body = ttk.Frame(self, padding=22)
         body.pack(fill="both", expand=True)
         body.columnconfigure(1, weight=1)
-        ttk.Label(body, text="NetBox-Gerät").grid(row=0, column=0, sticky="w", padx=(0, 12), pady=7)
+        tenants = ["Alle Mandanten"] + sorted(
+            {option["tenant"] for option in self.device_options},
+            key=str.casefold,
+        )
+        ttk.Label(body, text="Mandant").grid(row=0, column=0, sticky="w", padx=(0, 12), pady=7)
+        self.tenant_filter = tk.StringVar(value=selected_tenant)
+        tenant_combo = ttk.Combobox(body, textvariable=self.tenant_filter, values=tenants, state="readonly")
+        tenant_combo.grid(row=0, column=1, sticky="ew", pady=7)
+        tenant_combo.bind("<<ComboboxSelected>>", self.on_tenant_changed)
+
+        ttk.Label(body, text="NetBox-Gerät suchen").grid(row=1, column=0, sticky="w", padx=(0, 12), pady=7)
         self.device_selection = tk.StringVar(value=selected_device)
-        ttk.Combobox(
+        self.device_combo = ttk.Combobox(
             body,
             textvariable=self.device_selection,
-            values=device_values,
-            state="readonly",
-        ).grid(row=0, column=1, sticky="ew", pady=7)
+            values=[],
+        )
+        self.device_combo.grid(row=1, column=1, sticky="ew", pady=7)
+        self.device_combo.bind("<KeyRelease>", self.filter_devices)
 
-        ttk.Label(body, text="Plattform").grid(row=1, column=0, sticky="w", padx=(0, 12), pady=7)
+        ttk.Label(body, text="Plattform").grid(row=2, column=0, sticky="w", padx=(0, 12), pady=7)
         platform_map = {label: key for key, label in PLATFORMS.items()}
         self.platform_map = platform_map
         platform_display = tk.StringVar(value=PLATFORMS[self.platform.get()])
@@ -184,27 +208,50 @@ class SwitchSourceDialog(tk.Toplevel):
             textvariable=platform_display,
             values=list(platform_map),
             state="readonly",
-        ).grid(row=1, column=1, sticky="ew", pady=7)
+        ).grid(row=2, column=1, sticky="ew", pady=7)
 
-        self.host_entry = self.add_entry(body, 2, "Host / IP", switch.get("host", ""))
-        self.port_entry = self.add_entry(body, 3, "SSH-Port", str(switch.get("port", 22)))
-        self.username_entry = self.add_entry(body, 4, "Benutzer", switch.get("username", ""))
-        self.password_entry = self.add_entry(body, 5, "Passwort", switch.get("password", ""), secret=True)
+        self.host_entry = self.add_entry(body, 3, "Host / IP", switch.get("host", ""))
+        self.port_entry = self.add_entry(body, 4, "SSH-Port", str(switch.get("port", 22)))
+        self.username_entry = self.add_entry(body, 5, "Benutzer", switch.get("username", ""))
+        self.password_entry = self.add_entry(body, 6, "Passwort", switch.get("password", ""), secret=True)
         ttk.Checkbutton(body, text="Switch aktivieren", variable=self.enabled).grid(
-            row=6, column=0, columnspan=2, sticky="w", pady=(12, 4)
+            row=7, column=0, columnspan=2, sticky="w", pady=(12, 4)
         )
         ttk.Label(
             body,
             text="Das Passwort wird im Kundenprofil mit Windows DPAPI verschlüsselt gespeichert.",
             foreground="#52606d",
             wraplength=500,
-        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(12, 0))
         buttons = ttk.Frame(body)
-        buttons.grid(row=8, column=0, columnspan=2, sticky="e", pady=(22, 0))
+        buttons.grid(row=9, column=0, columnspan=2, sticky="e", pady=(22, 0))
         ttk.Button(buttons, text="Abbrechen", command=self.destroy).pack(side="left", padx=4)
         ttk.Button(buttons, text="Übernehmen", command=self.accept, style="Primary.TButton").pack(side="left", padx=4)
+        self.update_device_values()
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.wait_window(self)
+
+    def matching_device_options(self, query=""):
+        tenant = self.tenant_filter.get()
+        query = query.strip().casefold()
+        return [
+            option for option in self.device_options
+            if (tenant == "Alle Mandanten" or option["tenant"] == tenant)
+            and (not query or query in option["display"].casefold())
+        ]
+
+    def update_device_values(self, query=""):
+        self.device_combo["values"] = [option["display"] for option in self.matching_device_options(query)]
+
+    def filter_devices(self, _event=None):
+        self.update_device_values(self.device_selection.get())
+
+    def on_tenant_changed(self, _event=None):
+        current = self.device_selection.get()
+        allowed = {option["display"] for option in self.matching_device_options()}
+        if current not in allowed:
+            self.device_selection.set("")
+        self.update_device_values()
 
     @staticmethod
     def add_entry(parent, row, label, value, secret=False):
@@ -1348,6 +1395,8 @@ class NetBoxVMImporter:
                 self.switch_log(f"Lese {switch['name']} ({switch['host']}) aus …")
                 snapshot = discover_switch(switch)
                 self.switch_snapshots[switch["id"]] = snapshot
+                if snapshot.get("lldp_enabled_automatically"):
+                    self.switch_log(f"{switch['name']}: LLDP war deaktiviert und wurde automatisch aktiviert")
                 self.switch_log(
                     f"{switch['name']}: {len(snapshot['interfaces'])} Schnittstellen, "
                     f"{len(snapshot['neighbors'])} LLDP-Nachbarn"
