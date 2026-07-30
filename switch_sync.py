@@ -263,16 +263,19 @@ def _address_with_mask(address, mask=None):
 def parse_interface_ips(ipv4_output, ipv6_output, platform):
     entries = []
     if platform == "aruba_aos":
+        current_interface = ""
         for line in _clean_output(ipv4_output).splitlines():
-            match = re.match(
-                r"^\s*([^|]+?)\s*\|\s*(?:Manual|DHCP/Bootp|Disabled)\s+(\d+(?:\.\d+){3})\s+(\d+(?:\.\d+){3})",
-                line,
-                flags=re.I,
-            )
-            if match:
-                address = _address_with_mask(match.group(2), match.group(3))
+            if "|" not in line:
+                continue
+            interface_column, values = line.split("|", 1)
+            candidate = interface_column.strip()
+            if candidate and not re.search(r"(?i)^VLAN$", candidate) and not set(candidate) <= {"-", "+", " "}:
+                current_interface = candidate
+            addresses = re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", values)
+            if current_interface and len(addresses) >= 2:
+                address = _address_with_mask(addresses[0], addresses[1])
                 if address and not address.startswith("0.0.0.0/"):
-                    entries.append({"interface": match.group(1).strip(), "address": address})
+                    entries.append({"interface": current_interface, "address": address})
         current_interface = ""
         for line in _clean_output(ipv6_output).splitlines():
             vlan_match = re.match(r"^\s*Vlan Name\s*:\s*(.+)$", line, flags=re.I)
