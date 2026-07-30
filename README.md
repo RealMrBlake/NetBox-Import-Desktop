@@ -22,9 +22,11 @@ Windows-Desktopanwendung zum Synchronisieren virtueller Maschinen sowie HPE-/Aru
 - SSH-Erkennung für Aruba CX, ArubaOS-Switch/ProCurve und HPE Comware
 - Durchsuchbare, nach Mandant filterbare Auswahl vorhandener NetBox-Geräte
 - Automatische Aktivierung von global deaktiviertem LLDP auf unterstützten Switches
-- Synchronisierung von Switch-Schnittstellen und optionalen LLDP-Verbindungen als NetBox-Kabel
+- Synchronisierung von Switch-Schnittstellen und optionalen LLDP-/CDP-Verbindungen als NetBox-Kabel
 - Auslesen und Synchronisieren vorhandener IPv4-/IPv6-Adressen auf Switch-Schnittstellen
-- Spezieller LLDP-Detailparser mit Tabellen-Fallback für Aruba-6100-Switches
+- Robustes, vollständiges Einlesen großer SSH-Ausgaben von 48-Port-Switches
+- Spezieller LLDP-Detailparser und ergänzender CDP-Fallback für Aruba-6100-Switches mit AOS-CX 10.13
+- Skalierbares Switch-Protokoll sowie separates Fenster für Protokoll und SSH-Rohdaten
 
 ## Verwendung
 

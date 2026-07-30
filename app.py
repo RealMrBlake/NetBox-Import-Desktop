@@ -1026,8 +1026,7 @@ class NetBoxVMImporter:
         main = ttk.Frame(parent, padding=18)
         main.pack(fill="both", expand=True)
         main.columnconfigure(0, weight=1)
-        main.rowconfigure(3, weight=2)
-        main.rowconfigure(5, weight=2)
+        main.rowconfigure(3, weight=1)
 
         header = ttk.Frame(main)
         header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
@@ -1093,14 +1092,15 @@ class NetBoxVMImporter:
             style="Primary.TButton",
         ).pack(side="right")
 
-        result_card = ttk.LabelFrame(main, text="Schnittstellen & LLDP-Nachbarn", style="Card.TLabelframe")
-        result_card.grid(row=3, column=0, sticky="nsew", pady=(0, 10))
+        switch_workspace = ttk.Panedwindow(main, orient="vertical")
+        switch_workspace.grid(row=3, column=0, sticky="nsew", pady=(0, 10))
+        result_card = ttk.LabelFrame(switch_workspace, text="Schnittstellen & LLDP/CDP-Nachbarn", style="Card.TLabelframe")
         result_columns = ("switch", "interface", "state", "speed", "ips", "neighbor", "remote_port")
         self.switch_result_tree = ttk.Treeview(result_card, columns=result_columns, show="headings")
         result_headings = {
             "switch": "Switch", "interface": "Schnittstelle", "state": "Status",
             "speed": "Geschwindigkeit", "ips": "IP-Adressen",
-            "neighbor": "LLDP-Nachbar", "remote_port": "Nachbar-Port",
+            "neighbor": "LLDP/CDP-Nachbar", "remote_port": "Nachbar-Port",
         }
         result_widths = {
             "switch": 150, "interface": 140, "state": 70, "speed": 100,
@@ -1114,18 +1114,24 @@ class NetBoxVMImporter:
         self.switch_result_tree.pack(side="left", fill="both", expand=True)
         result_scroll.pack(side="right", fill="y")
 
+        log_card = ttk.LabelFrame(switch_workspace, text="Switch-Protokoll", style="Card.TLabelframe")
+        self.switch_log_text = tk.Text(
+            log_card, height=6, borderwidth=0, bg="#f7f9fb", foreground="#243b53", font=("Consolas", 9), state="disabled"
+        )
+        log_scroll = ttk.Scrollbar(log_card, orient="vertical", command=self.switch_log_text.yview)
+        self.switch_log_text.configure(yscrollcommand=log_scroll.set)
+        self.switch_log_text.pack(side="left", fill="both", expand=True)
+        log_scroll.pack(side="right", fill="y")
+        switch_workspace.add(result_card, weight=4)
+        switch_workspace.add(log_card, weight=1)
+
         actions = ttk.Frame(main)
         actions.grid(row=4, column=0, sticky="ew", pady=(0, 10))
         self.create_neighbor_cables = tk.BooleanVar(value=True)
-        ttk.Checkbutton(actions, text="LLDP-Verbindungen als Kabel anlegen", variable=self.create_neighbor_cables).pack(side="left")
+        ttk.Checkbutton(actions, text="LLDP/CDP-Verbindungen als Kabel anlegen", variable=self.create_neighbor_cables).pack(side="left")
         ttk.Button(actions, text="Nach NetBox synchronisieren", command=self.sync_switches, style="Primary.TButton").pack(side="right")
-
-        log_card = ttk.LabelFrame(main, text="Switch-Protokoll", style="Card.TLabelframe")
-        log_card.grid(row=5, column=0, sticky="nsew")
-        self.switch_log_text = tk.Text(
-            log_card, height=8, borderwidth=0, bg="#f7f9fb", foreground="#243b53", font=("Consolas", 9), state="disabled"
-        )
-        self.switch_log_text.pack(fill="both", expand=True)
+        ttk.Button(actions, text="SSH-Rohdaten", command=self.open_switch_raw_window).pack(side="right", padx=(0, 8))
+        ttk.Button(actions, text="Protokoll öffnen", command=self.open_switch_log_window).pack(side="right", padx=(0, 8))
 
     @staticmethod
     def add_field(parent, row, label, secret=False, variable=None):
@@ -1305,6 +1311,61 @@ class NetBoxVMImporter:
         self.status_text.set(text)
         self.root.update()
 
+    def _open_switch_text_window(self, title, content):
+        window = tk.Toplevel(self.root)
+        window.title(title)
+        window.geometry("1000x650")
+        window.minsize(700, 400)
+        icon = self.resource_path("netbox_vm_import.ico")
+        if icon.exists():
+            try:
+                window.iconbitmap(str(icon))
+            except tk.TclError:
+                pass
+        frame = ttk.Frame(window, padding=10)
+        frame.pack(fill="both", expand=True)
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        text_widget = tk.Text(frame, wrap="none", font=("Consolas", 9), bg="#f7f9fb", foreground="#243b53")
+        vertical = ttk.Scrollbar(frame, orient="vertical", command=text_widget.yview)
+        horizontal = ttk.Scrollbar(frame, orient="horizontal", command=text_widget.xview)
+        text_widget.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        text_widget.grid(row=0, column=0, sticky="nsew")
+        vertical.grid(row=0, column=1, sticky="ns")
+        horizontal.grid(row=1, column=0, sticky="ew")
+        text_widget.insert("1.0", content)
+        text_widget.configure(state="disabled")
+        return window
+
+    def open_switch_log_window(self):
+        content = self.switch_log_text.get("1.0", "end-1c") or "Noch keine Protokolleinträge vorhanden."
+        self._open_switch_text_window("Switch-Protokoll", content)
+
+    def open_switch_raw_window(self):
+        selected_ids = set(self.switch_tree.selection())
+        snapshots = [
+            (switch, self.switch_snapshots.get(switch["id"]))
+            for switch in self.current_switches
+            if (not selected_ids or switch["id"] in selected_ids) and self.switch_snapshots.get(switch["id"])
+        ]
+        if not snapshots:
+            messagebox.showinfo("SSH-Rohdaten", "Bitte zuerst mindestens einen Switch auslesen.", parent=self.root)
+            return
+        sections = []
+        labels = {
+            "interfaces": "SCHNITTSTELLEN",
+            "ipv4_interfaces": "IPV4-SCHNITTSTELLEN",
+            "ipv6_interfaces": "IPV6-SCHNITTSTELLEN",
+            "neighbors": "LLDP-NACHBARN",
+            "cdp_neighbors": "CDP-NACHBARN",
+        }
+        for switch, snapshot in snapshots:
+            sections.append(f"{'=' * 20} {switch['name']} ({switch['host']}) {'=' * 20}")
+            raw = snapshot.get("raw", {})
+            for key, label in labels.items():
+                sections.extend((f"\n--- {label} ---", str(raw.get(key, "") or "(keine Ausgabe)")))
+        self._open_switch_text_window("SSH-Rohdaten", "\n".join(sections))
+
     def refresh_switch_tree(self):
         if not hasattr(self, "switch_tree"):
             return
@@ -1404,8 +1465,13 @@ class NetBoxVMImporter:
                 self.switch_log(
                     f"{switch['name']}: {len(snapshot['interfaces'])} Schnittstellen, "
                     f"{len(snapshot.get('ip_addresses', []))} IP-Adressen, "
-                    f"{len(snapshot['neighbors'])} LLDP-Nachbarn"
+                    f"{len(snapshot.get('lldp_neighbors', []))} LLDP- und "
+                    f"{len(snapshot.get('cdp_neighbors', []))} CDP-Nachbarn"
                 )
+                if not snapshot["interfaces"]:
+                    self.switch_log(f"WARNUNG {switch['name']}: Keine Schnittstellen erkannt – bitte SSH-Rohdaten prüfen")
+                if not snapshot["neighbors"]:
+                    self.switch_log(f"WARNUNG {switch['name']}: Keine LLDP/CDP-Nachbarn erkannt – bitte SSH-Rohdaten prüfen")
             except Exception as error:
                 failures.append(f"{switch['name']}: {error}")
                 self.switch_log(f"FEHLER {switch['name']}: {error}")

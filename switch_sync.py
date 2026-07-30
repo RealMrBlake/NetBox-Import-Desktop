@@ -53,7 +53,7 @@ def _clean_output(value):
     return value
 
 
-def _read_available(channel, quiet_seconds=0.35, timeout=12):
+def _read_available(channel, quiet_seconds=0.8, timeout=20):
     chunks = []
     started = time.monotonic()
     last_data = started
@@ -61,7 +61,14 @@ def _read_available(channel, quiet_seconds=0.35, timeout=12):
         if channel.recv_ready():
             chunks.append(channel.recv(65535).decode("utf-8", errors="replace"))
             last_data = time.monotonic()
-        elif time.monotonic() - last_data >= quiet_seconds:
+            # Interactive AOS-CX/AOS-S/Comware commands are complete when the
+            # device prompt returns. This avoids truncating output at a short
+            # pause while also avoiding a fixed delay after every command.
+            if re.search(r"(?m)^\s*[^\r\n]+[>#]\s*$", "".join(chunks)):
+                break
+        elif chunks and time.monotonic() - last_data >= quiet_seconds:
+            break
+        elif not chunks and time.monotonic() - started >= min(timeout, 5):
             break
         else:
             time.sleep(0.05)
@@ -87,7 +94,7 @@ def run_switch_commands(config):
             banner_timeout=12,
         )
         channel = client.invoke_shell(width=240, height=1000)
-        _read_available(channel, timeout=3)
+        _read_available(channel, quiet_seconds=0.5, timeout=5)
         pager_command, interface_command, neighbor_command = COMMANDS[platform]
         channel.send(pager_command + "\n")
         _read_available(channel)
@@ -116,21 +123,36 @@ def run_switch_commands(config):
             time.sleep(2)
 
         channel.send(interface_command + "\n")
-        interfaces = _read_available(channel)
+        interfaces = _read_available(channel, quiet_seconds=1.2, timeout=30)
         ip_outputs = []
         for command in IP_COMMANDS[platform]:
             channel.send(command + "\n")
-            ip_outputs.append(_read_available(channel))
+            ip_outputs.append(_read_available(channel, quiet_seconds=1.0, timeout=25))
         channel.send(neighbor_command + "\n")
-        neighbors = _read_available(channel)
+        neighbors = _read_available(channel, quiet_seconds=1.5, timeout=35)
         if platform == "aruba_cx" and re.search(r"(?i)invalid input|unknown command|unrecognized", neighbors):
             channel.send("show lldp neighbor-info\n")
-            neighbors = _read_available(channel)
+            neighbors = _read_available(channel, quiet_seconds=1.5, timeout=35)
+        cdp_neighbors = ""
+        if platform == "aruba_cx":
+            channel.send("show cdp neighbor-info\n")
+            cdp_summary = _read_available(channel, quiet_seconds=1.2, timeout=25)
+            cdp_ports = []
+            for line in cdp_summary.splitlines():
+                match = re.match(r"^\s*(\d+/\d+/\d+)\s+\S+", line)
+                if match and match.group(1) not in cdp_ports:
+                    cdp_ports.append(match.group(1))
+            details = []
+            for port in cdp_ports:
+                channel.send(f"show cdp neighbor-info {port}\n")
+                details.append(_read_available(channel, quiet_seconds=1.0, timeout=20))
+            cdp_neighbors = "\n".join([cdp_summary, *details])
         return {
             "interfaces": interfaces,
             "ipv4_interfaces": ip_outputs[0],
             "ipv6_interfaces": ip_outputs[1],
             "neighbors": neighbors,
+            "cdp_neighbors": cdp_neighbors,
             "lldp_enabled_automatically": lldp_enabled_automatically,
         }
     finally:
@@ -322,6 +344,37 @@ def parse_neighbors(output):
     return neighbors
 
 
+def parse_cdp_neighbors(output):
+    """Parse detailed AOS-CX CDP records into the common neighbor shape."""
+    clean = _clean_output(output)
+    starts = list(re.finditer(r"(?im)^\s*Local Port\s*:\s*\S+", clean))
+    neighbors = []
+    for index, start in enumerate(starts):
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(clean)
+        block = clean[start.start():end]
+        local_port = _field(block, (r"^\s*Local Port\s*:\s*(\S+)",))
+        system_name = _field(block, (
+            r"^\s*Device ID\s*:\s*(.+)$",
+            r"^\s*System Name\s*:\s*(.+)$",
+        ))
+        remote_port = _field(block, (
+            r"^\s*Neighbor Port-ID\s*:\s*(.+)$",
+            r"^\s*Port ID\s*:\s*(.+)$",
+        ))
+        management_ip = _field(block, (
+            r"^\s*Address\s*:\s*([0-9a-fA-F:.]+)",
+            r"^\s*Management Address\s*:\s*([0-9a-fA-F:.]+)",
+        ))
+        if local_port and (system_name or remote_port or management_ip):
+            neighbors.append({
+                "local_port": local_port,
+                "system_name": system_name,
+                "remote_port": remote_port,
+                "management_ip": management_ip,
+            })
+    return neighbors
+
+
 def _parse_neighbor_table(output):
     neighbors = []
     for raw_line in output.splitlines():
@@ -360,7 +413,17 @@ def discover_switch(config):
         outputs.get("ipv6_interfaces", ""),
         config["platform"],
     )
-    neighbors = parse_neighbors(outputs["neighbors"])
+    lldp_neighbors = parse_neighbors(outputs["neighbors"])
+    cdp_neighbors = parse_cdp_neighbors(outputs.get("cdp_neighbors", ""))
+    # LLDP normally contains richer data. CDP fills ports for which CX did not
+    # return an LLDP record, without duplicating a physical local interface.
+    neighbors = list(lldp_neighbors)
+    occupied_ports = {_interface_key(item["local_port"]) for item in neighbors}
+    for neighbor in cdp_neighbors:
+        key = _interface_key(neighbor["local_port"])
+        if key not in occupied_ports:
+            neighbors.append(neighbor)
+            occupied_ports.add(key)
     interface_map = {_interface_key(interface["name"]): interface for interface in interfaces}
     for item in interface_ips:
         key = _interface_key(item["interface"])
@@ -388,6 +451,8 @@ def discover_switch(config):
         "interfaces": interfaces,
         "ip_addresses": interface_ips,
         "neighbors": neighbors,
+        "lldp_neighbors": lldp_neighbors,
+        "cdp_neighbors": cdp_neighbors,
         "raw": outputs,
         "lldp_enabled_automatically": outputs.get("lldp_enabled_automatically", False),
     }
