@@ -872,7 +872,7 @@ class NetworkManagementDialog(tk.Toplevel):
 class NetBoxVMImporter:
     def __init__(self, root):
         self.root = root
-        self.root.title("VMware & Proxmox → NetBox Synchronizer")
+        self.root.title("NetBox Synchronizer")
         self.root.geometry("1160x850")
         self.root.minsize(960, 700)
 
