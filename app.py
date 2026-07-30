@@ -842,6 +842,8 @@ class NetBoxVMImporter:
         self.vrfs = []
         self.platforms = []
         self.profile_name = tk.StringVar()
+        self.netbox_url_var = tk.StringVar()
+        self.netbox_token_var = tk.StringVar()
         self.netbox_ignore_ssl = tk.BooleanVar(value=False)
         self.status_text = tk.StringVar(value="Bereit")
         self.store = ProfileStore()
@@ -925,8 +927,8 @@ class NetBoxVMImporter:
         ttk.Button(source_buttons, text="Bearbeiten", command=self.edit_source).pack(side="left", padx=5)
         ttk.Button(source_buttons, text="Entfernen", command=self.remove_source).pack(side="left")
 
-        self.netbox_url = self.add_field(netbox_card, 0, "URL")
-        self.netbox_token = self.add_field(netbox_card, 1, "API-Token", secret=True)
+        self.netbox_url = self.add_field(netbox_card, 0, "URL", variable=self.netbox_url_var)
+        self.netbox_token = self.add_field(netbox_card, 1, "API-Token", secret=True, variable=self.netbox_token_var)
         ttk.Checkbutton(netbox_card, text="Zertifikatsprüfung deaktivieren", variable=self.netbox_ignore_ssl).grid(
             row=2, column=0, columnspan=2, sticky="w", pady=(10, 0)
         )
@@ -977,21 +979,48 @@ class NetBoxVMImporter:
         main = ttk.Frame(parent, padding=18)
         main.pack(fill="both", expand=True)
         main.columnconfigure(0, weight=1)
-        main.rowconfigure(2, weight=2)
-        main.rowconfigure(4, weight=3)
+        main.rowconfigure(3, weight=2)
+        main.rowconfigure(5, weight=2)
 
         header = ttk.Frame(main)
         header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         ttk.Label(header, text="HPE & Aruba Switche", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
             header,
-            text="Bestehende NetBox-Geräte per SSH auslesen · Profil: ",
+            text="Bestehende NetBox-Geräte per SSH auslesen und dokumentieren",
             style="Subtitle.TLabel",
-        ).pack(side="left")
-        ttk.Label(header, textvariable=self.profile_name, style="Subtitle.TLabel").pack(side="left")
+        ).pack(anchor="w")
+
+        settings = ttk.Panedwindow(main, orient="horizontal")
+        settings.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        profile_card = ttk.LabelFrame(settings, text="Kundenprofil", style="Card.TLabelframe")
+        netbox_card = ttk.LabelFrame(settings, text="NetBox-Ziel", style="Card.TLabelframe")
+        settings.add(profile_card, weight=3)
+        settings.add(netbox_card, weight=2)
+
+        self.switch_profile_combo = ttk.Combobox(profile_card, textvariable=self.profile_name, state="readonly")
+        self.switch_profile_combo.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.switch_profile_combo.bind("<<ComboboxSelected>>", self.on_profile_selected)
+        ttk.Button(profile_card, text="Neu", command=self.new_profile).pack(side="left", padx=3)
+        ttk.Button(profile_card, text="Speichern", command=self.save_profile).pack(side="left", padx=3)
+        ttk.Button(profile_card, text="Löschen", command=self.delete_profile).pack(side="left", padx=3)
+
+        self.switch_netbox_url = self.add_field(netbox_card, 0, "URL", variable=self.netbox_url_var)
+        self.switch_netbox_token = self.add_field(
+            netbox_card,
+            1,
+            "API-Token",
+            secret=True,
+            variable=self.netbox_token_var,
+        )
+        ttk.Checkbutton(
+            netbox_card,
+            text="Zertifikatsprüfung deaktivieren",
+            variable=self.netbox_ignore_ssl,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         source_card = ttk.LabelFrame(main, text="Switch-Zugänge", style="Card.TLabelframe")
-        source_card.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
+        source_card.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
         switch_columns = ("device", "platform", "host", "active")
         self.switch_tree = ttk.Treeview(source_card, columns=switch_columns, show="headings", height=6)
         for column, title, width in (
@@ -1018,7 +1047,7 @@ class NetBoxVMImporter:
         ).pack(side="right")
 
         result_card = ttk.LabelFrame(main, text="Schnittstellen & LLDP-Nachbarn", style="Card.TLabelframe")
-        result_card.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
+        result_card.grid(row=3, column=0, sticky="nsew", pady=(0, 10))
         result_columns = ("switch", "interface", "state", "speed", "neighbor", "remote_port")
         self.switch_result_tree = ttk.Treeview(result_card, columns=result_columns, show="headings")
         result_headings = {
@@ -1035,22 +1064,22 @@ class NetBoxVMImporter:
         result_scroll.pack(side="right", fill="y")
 
         actions = ttk.Frame(main)
-        actions.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        actions.grid(row=4, column=0, sticky="ew", pady=(0, 10))
         self.create_neighbor_cables = tk.BooleanVar(value=True)
         ttk.Checkbutton(actions, text="LLDP-Verbindungen als Kabel anlegen", variable=self.create_neighbor_cables).pack(side="left")
         ttk.Button(actions, text="Nach NetBox synchronisieren", command=self.sync_switches, style="Primary.TButton").pack(side="right")
 
         log_card = ttk.LabelFrame(main, text="Switch-Protokoll", style="Card.TLabelframe")
-        log_card.grid(row=4, column=0, sticky="nsew")
+        log_card.grid(row=5, column=0, sticky="nsew")
         self.switch_log_text = tk.Text(
             log_card, height=8, borderwidth=0, bg="#f7f9fb", foreground="#243b53", font=("Consolas", 9), state="disabled"
         )
         self.switch_log_text.pack(fill="both", expand=True)
 
     @staticmethod
-    def add_field(parent, row, label, secret=False):
+    def add_field(parent, row, label, secret=False, variable=None):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=5)
-        entry = ttk.Entry(parent, show="•" if secret else "")
+        entry = ttk.Entry(parent, show="•" if secret else "", textvariable=variable)
         entry.grid(row=row, column=1, sticky="ew", pady=5)
         parent.columnconfigure(1, weight=1)
         return entry
@@ -1084,7 +1113,10 @@ class NetBoxVMImporter:
             messagebox.showwarning("Konfiguration", f"Profile konnten nicht geladen werden:\n{error}")
 
     def refresh_profile_list(self):
-        self.profile_combo["values"] = sorted(self.profiles, key=str.casefold)
+        values = sorted(self.profiles, key=str.casefold)
+        self.profile_combo["values"] = values
+        if hasattr(self, "switch_profile_combo"):
+            self.switch_profile_combo["values"] = values
 
     def profile_from_form(self, name):
         return {
@@ -1242,8 +1274,16 @@ class NetBoxVMImporter:
                 return False
             self.connect_netbox()
             self.switch_log("Lade vorhandene NetBox-Geräte …")
-            self.netbox_devices = sorted(self.nb.dcim.devices.all(), key=lambda item: item.name.casefold())
-            self.switch_log(f"{len(self.netbox_devices)} NetBox-Geräte geladen")
+            devices = list(self.nb.dcim.devices.all())
+            self.netbox_devices = sorted(
+                (device for device in devices if getattr(device, "name", None)),
+                key=lambda item: str(item.name).casefold(),
+            )
+            ignored = len(devices) - len(self.netbox_devices)
+            text = f"{len(self.netbox_devices)} benannte NetBox-Geräte geladen"
+            if ignored:
+                text += f" ({ignored} Gerät(e) ohne Namen übersprungen)"
+            self.switch_log(text)
             return True
         except Exception as error:
             messagebox.showerror("NetBox-Verbindung", str(error), parent=self.root)
