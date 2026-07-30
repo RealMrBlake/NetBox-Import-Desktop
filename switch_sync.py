@@ -321,9 +321,12 @@ def parse_neighbors(output):
         ))
         system_name = _field(block, (
             r"^\s*Neighbor Chassis-Name\s*:\s*(.+)$",
+            r"^[ \t]*Neighbor System-Name[ \t]*:[ \t]*(.*)$",
             r"^\s*(?:System Name|SysName)\s*[: ]\s*(.+)$",
             r"^\s*Neighbor name\s*[: ]\s*(.+)$",
         ))
+        if not system_name:
+            system_name = _field(block, (r"^\s*Neighbor Chassis-ID\s*:\s*(.+)$",))
         remote_port = _field(block, (
             r"^\s*Neighbor Port-ID\s*:\s*(.+)$",
             r"^\s*Neighbor Port-Desc\s*:\s*(.+)$",
