@@ -1,5 +1,6 @@
 """SSH discovery and NetBox synchronization for HPE and Aruba switches."""
 
+import ipaddress
 import re
 import time
 
@@ -13,9 +14,15 @@ PLATFORMS = {
 }
 
 COMMANDS = {
-    "aruba_cx": ("no page", "show interface brief", "show lldp neighbor-info"),
+    "aruba_cx": ("no page", "show interface brief", "show lldp neighbor-info detail"),
     "aruba_aos": ("no page", "show interfaces brief", "show lldp info remote-device"),
     "hpe_comware": ("screen-length disable", "display interface brief", "display lldp neighbor-information verbose"),
+}
+
+IP_COMMANDS = {
+    "aruba_cx": ("show ip interface brief", "show ipv6 interface brief"),
+    "aruba_aos": ("show ip", "show ipv6"),
+    "hpe_comware": ("display ip interface brief", "display ipv6 interface brief"),
 }
 
 LLDP_CONTROL = {
@@ -110,10 +117,19 @@ def run_switch_commands(config):
 
         channel.send(interface_command + "\n")
         interfaces = _read_available(channel)
+        ip_outputs = []
+        for command in IP_COMMANDS[platform]:
+            channel.send(command + "\n")
+            ip_outputs.append(_read_available(channel))
         channel.send(neighbor_command + "\n")
         neighbors = _read_available(channel)
+        if platform == "aruba_cx" and re.search(r"(?i)invalid input|unknown command|unrecognized", neighbors):
+            channel.send("show lldp neighbor-info\n")
+            neighbors = _read_available(channel)
         return {
             "interfaces": interfaces,
+            "ipv4_interfaces": ip_outputs[0],
+            "ipv6_interfaces": ip_outputs[1],
             "neighbors": neighbors,
             "lldp_enabled_automatically": lldp_enabled_automatically,
         }
@@ -147,7 +163,7 @@ def _interface_name(token):
     token = token.strip(" |:")
     return bool(re.match(
         r"(?i)^(?:\d+(?:/\d+){0,3}|(?:GE|XGE|HGE|FGE|FortyGigE|Ten-GigabitEthernet|GigabitEthernet)\S+|"
-        r"Bridge-Aggregation\d+|Trk\d+|lag\d+)$",
+        r"Bridge-Aggregation\d+|Trk\d+|lag\d+|Vlan-interface\d+|vlan\s*\d+|loopback\s*\d*|lo\d+|mgmt)$",
         token,
     ))
 
@@ -185,9 +201,75 @@ def parse_interfaces(output, platform):
             "mac_address": _normalize_mac(mac_match.group(0)) if mac_match else None,
             "description": description,
             "neighbor": None,
+            "ip_addresses": [],
+            "virtual": False,
         })
         seen.add(name)
     return interfaces
+
+
+def _address_with_mask(address, mask=None):
+    try:
+        if "/" in address:
+            return str(ipaddress.ip_interface(address))
+        if mask:
+            return str(ipaddress.ip_interface(f"{address}/{mask}"))
+    except ValueError:
+        return None
+    return None
+
+
+def parse_interface_ips(ipv4_output, ipv6_output, platform):
+    entries = []
+    if platform == "aruba_aos":
+        for line in _clean_output(ipv4_output).splitlines():
+            match = re.match(
+                r"^\s*([^|]+?)\s*\|\s*(?:Manual|DHCP/Bootp|Disabled)\s+(\d+(?:\.\d+){3})\s+(\d+(?:\.\d+){3})",
+                line,
+                flags=re.I,
+            )
+            if match:
+                address = _address_with_mask(match.group(2), match.group(3))
+                if address and not address.startswith("0.0.0.0/"):
+                    entries.append({"interface": match.group(1).strip(), "address": address})
+        current_interface = ""
+        for line in _clean_output(ipv6_output).splitlines():
+            vlan_match = re.match(r"^\s*Vlan Name\s*:\s*(.+)$", line, flags=re.I)
+            if vlan_match:
+                current_interface = vlan_match.group(1).strip()
+            address_match = re.search(r"([0-9a-fA-F:]+/\d{1,3})", line)
+            if address_match and current_interface:
+                address = _address_with_mask(address_match.group(1))
+                if address and not address.lower().startswith("fe80:"):
+                    entries.append({"interface": current_interface, "address": address})
+    else:
+        for output, version in ((ipv4_output, 4), (ipv6_output, 6)):
+            for line in _clean_output(output).splitlines():
+                tokens = re.split(r"\s+", line.strip())
+                if len(tokens) < 2 or not _interface_name(tokens[0]):
+                    continue
+                patterns = (
+                    r"\b(\d+(?:\.\d+){3}/\d{1,2})\b"
+                    if version == 4 else
+                    r"\b([0-9a-fA-F]*:[0-9a-fA-F:]+/\d{1,3})\b"
+                )
+                match = re.search(patterns, line)
+                if not match:
+                    continue
+                address = _address_with_mask(match.group(1))
+                if not address or address.startswith("0.0.0.0/") or address.lower().startswith("fe80:"):
+                    continue
+                entries.append({"interface": tokens[0], "address": address})
+    unique = {}
+    for entry in entries:
+        unique[(entry["interface"].casefold(), entry["address"])] = entry
+    return list(unique.values())
+
+
+def _interface_key(value):
+    value = value.casefold().replace("_", "").replace("-", "").replace(" ", "")
+    value = value.replace("vlaninterface", "vlan")
+    return value
 
 
 def _field(block, patterns):
@@ -201,7 +283,7 @@ def _field(block, patterns):
 def parse_neighbors(output):
     clean = _clean_output(output)
     starts = list(re.finditer(
-        r"(?im)^(?:\s*(?:Local (?:Port|Interface|Intf)|LLDP neighbor-information of port)\s*[: ]\s*.+)$",
+        r"(?im)^(?:\s*(?:Port|Local (?:Port|Interface|Intf)|LLDP neighbor-information of port)\s*[: ]\s*.+)$",
         clean,
     ))
     if not starts:
@@ -211,18 +293,23 @@ def parse_neighbors(output):
         end = starts[index + 1].start() if index + 1 < len(starts) else len(clean)
         block = clean[start.start():end]
         local_port = _field(block, (
+            r"^\s*Port\s*:\s*(\S+)",
             r"^\s*Local (?:Port|Interface|Intf)\s*[: ]\s*(\S+)",
             r"^\s*LLDP neighbor-information of port\s+(?:\d+\[)?([^\]\s:]+)\]?",
         ))
         system_name = _field(block, (
+            r"^\s*Neighbor Chassis-Name\s*:\s*(.+)$",
             r"^\s*(?:System Name|SysName)\s*[: ]\s*(.+)$",
             r"^\s*Neighbor name\s*[: ]\s*(.+)$",
         ))
         remote_port = _field(block, (
+            r"^\s*Neighbor Port-ID\s*:\s*(.+)$",
+            r"^\s*Neighbor Port-Desc\s*:\s*(.+)$",
             r"^\s*(?:Port ID|PortId|Port ID subtype.*\n\s*Port ID)\s*[: ]\s*(.+)$",
             r"^\s*(?:Port Description|PortDesc)\s*[: ]\s*(.+)$",
         ))
         management_ip = _field(block, (
+            r"^\s*Neighbor Management-Address\s*:\s*([0-9a-fA-F:.]+)",
             r"^\s*(?:Management Address|Management address|Management IP)\s*[: ]\s*([0-9a-fA-F:.]+)",
         ))
         if local_port and (system_name or remote_port):
@@ -268,21 +355,47 @@ def _parse_neighbor_table(output):
 def discover_switch(config):
     outputs = run_switch_commands(config)
     interfaces = parse_interfaces(outputs["interfaces"], config["platform"])
+    interface_ips = parse_interface_ips(
+        outputs.get("ipv4_interfaces", ""),
+        outputs.get("ipv6_interfaces", ""),
+        config["platform"],
+    )
     neighbors = parse_neighbors(outputs["neighbors"])
-    interface_map = {interface["name"].casefold(): interface for interface in interfaces}
+    interface_map = {_interface_key(interface["name"]): interface for interface in interfaces}
+    for item in interface_ips:
+        key = _interface_key(item["interface"])
+        interface = interface_map.get(key)
+        if not interface:
+            interface = {
+                "name": item["interface"],
+                "enabled": True,
+                "connected": True,
+                "speed_mbps": None,
+                "mac_address": None,
+                "description": "Logisches Layer-3-Interface",
+                "neighbor": None,
+                "ip_addresses": [],
+                "virtual": True,
+            }
+            interfaces.append(interface)
+            interface_map[key] = interface
+        interface["ip_addresses"].append(item["address"])
     for neighbor in neighbors:
-        local = interface_map.get(neighbor["local_port"].casefold())
+        local = interface_map.get(_interface_key(neighbor["local_port"]))
         if local:
             local["neighbor"] = neighbor
     return {
         "interfaces": interfaces,
+        "ip_addresses": interface_ips,
         "neighbors": neighbors,
         "raw": outputs,
         "lldp_enabled_automatically": outputs.get("lldp_enabled_automatically", False),
     }
 
 
-def _netbox_interface_type(speed_mbps):
+def _netbox_interface_type(speed_mbps, virtual=False):
+    if virtual:
+        return "virtual"
     if not speed_mbps:
         return "other"
     if speed_mbps >= 100_000:
@@ -301,13 +414,15 @@ def _netbox_interface_type(speed_mbps):
 def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True):
     device_id = int(config["device_id"])
     interface_records = {}
-    created = updated = cables = 0
+    created = updated = cables = ip_addresses = 0
     errors = []
+    device = nb.dcim.devices.get(id=device_id)
+    tenant_id = getattr(getattr(device, "tenant", None), "id", None) if device else None
     for interface in snapshot["interfaces"]:
         payload = {
             "device": device_id,
             "name": interface["name"],
-            "type": _netbox_interface_type(interface.get("speed_mbps")),
+            "type": _netbox_interface_type(interface.get("speed_mbps"), interface.get("virtual", False)),
             "enabled": interface.get("enabled", True),
         }
         if interface.get("description"):
@@ -325,6 +440,35 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True):
             interface_records[interface["name"].casefold()] = record
         except Exception as error:
             errors.append(f"Interface {interface['name']}: {error}")
+
+    for interface in snapshot["interfaces"]:
+        record = interface_records.get(interface["name"].casefold())
+        if not record:
+            continue
+        for address in interface.get("ip_addresses", []):
+            try:
+                host = str(ipaddress.ip_interface(address).ip)
+                candidates = [
+                    item for item in nb.ipam.ip_addresses.filter(address=host)
+                    if getattr(getattr(item, "vrf", None), "id", None) is None
+                ]
+                if len(candidates) > 1:
+                    raise ValueError("mehrere globale IP-Adressen mit diesem Host gefunden")
+                payload = {
+                    "address": address,
+                    "status": "active",
+                    "assigned_object_type": "dcim.interface",
+                    "assigned_object_id": record.id,
+                }
+                if tenant_id:
+                    payload["tenant"] = tenant_id
+                if candidates:
+                    candidates[0].update(payload)
+                else:
+                    nb.ipam.ip_addresses.create(payload)
+                ip_addresses += 1
+            except Exception as error:
+                errors.append(f"IP-Adresse {address} auf {interface['name']}: {error}")
 
     if create_cables:
         for neighbor in snapshot["neighbors"]:
@@ -349,4 +493,10 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True):
                     f"Nachbar {neighbor.get('local_port')} → {neighbor.get('system_name')} "
                     f"{neighbor.get('remote_port')}: {error}"
                 )
-    return {"created": created, "updated": updated, "cables": cables, "errors": errors}
+    return {
+        "created": created,
+        "updated": updated,
+        "ip_addresses": ip_addresses,
+        "cables": cables,
+        "errors": errors,
+    }

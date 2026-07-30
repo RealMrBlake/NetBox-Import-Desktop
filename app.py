@@ -1095,13 +1095,17 @@ class NetBoxVMImporter:
 
         result_card = ttk.LabelFrame(main, text="Schnittstellen & LLDP-Nachbarn", style="Card.TLabelframe")
         result_card.grid(row=3, column=0, sticky="nsew", pady=(0, 10))
-        result_columns = ("switch", "interface", "state", "speed", "neighbor", "remote_port")
+        result_columns = ("switch", "interface", "state", "speed", "ips", "neighbor", "remote_port")
         self.switch_result_tree = ttk.Treeview(result_card, columns=result_columns, show="headings")
         result_headings = {
             "switch": "Switch", "interface": "Schnittstelle", "state": "Status",
-            "speed": "Geschwindigkeit", "neighbor": "LLDP-Nachbar", "remote_port": "Nachbar-Port",
+            "speed": "Geschwindigkeit", "ips": "IP-Adressen",
+            "neighbor": "LLDP-Nachbar", "remote_port": "Nachbar-Port",
         }
-        result_widths = {"switch": 180, "interface": 150, "state": 80, "speed": 110, "neighbor": 210, "remote_port": 170}
+        result_widths = {
+            "switch": 150, "interface": 140, "state": 70, "speed": 100,
+            "ips": 210, "neighbor": 170, "remote_port": 140,
+        }
         for column in result_columns:
             self.switch_result_tree.heading(column, text=result_headings[column])
             self.switch_result_tree.column(column, width=result_widths[column])
@@ -1399,6 +1403,7 @@ class NetBoxVMImporter:
                     self.switch_log(f"{switch['name']}: LLDP war deaktiviert und wurde automatisch aktiviert")
                 self.switch_log(
                     f"{switch['name']}: {len(snapshot['interfaces'])} Schnittstellen, "
+                    f"{len(snapshot.get('ip_addresses', []))} IP-Adressen, "
                     f"{len(snapshot['neighbors'])} LLDP-Nachbarn"
                 )
             except Exception as error:
@@ -1424,6 +1429,7 @@ class NetBoxVMImporter:
                     interface["name"],
                     "Up" if interface.get("connected") else "Down",
                     speed_text,
+                    ", ".join(interface.get("ip_addresses", [])),
                     neighbor.get("system_name", ""),
                     neighbor.get("remote_port", ""),
                 ))
@@ -1435,7 +1441,7 @@ class NetBoxVMImporter:
         if self.nb is None and not self.load_switch_devices():
             return
         switch_map = {switch["id"]: switch for switch in self.current_switches}
-        totals = {"created": 0, "updated": 0, "cables": 0}
+        totals = {"created": 0, "updated": 0, "ip_addresses": 0, "cables": 0}
         errors = []
         for switch_id, snapshot in self.switch_snapshots.items():
             switch = switch_map.get(switch_id)
@@ -1453,7 +1459,7 @@ class NetBoxVMImporter:
             errors.extend(f"{switch['name']}: {error}" for error in result["errors"])
         text = (
             f"{totals['created']} Schnittstellen erstellt, {totals['updated']} aktualisiert, "
-            f"{totals['cables']} LLDP-Kabel angelegt."
+            f"{totals['ip_addresses']} IP-Adressen synchronisiert, {totals['cables']} LLDP-Kabel angelegt."
         )
         self.switch_log(text)
         if errors:

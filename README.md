@@ -23,6 +23,8 @@ Windows-Desktopanwendung zum Synchronisieren virtueller Maschinen sowie HPE-/Aru
 - Durchsuchbare, nach Mandant filterbare Auswahl vorhandener NetBox-Geräte
 - Automatische Aktivierung von global deaktiviertem LLDP auf unterstützten Switches
 - Synchronisierung von Switch-Schnittstellen und optionalen LLDP-Verbindungen als NetBox-Kabel
+- Auslesen und Synchronisieren vorhandener IPv4-/IPv6-Adressen auf Switch-Schnittstellen
+- Spezieller LLDP-Detailparser mit Tabellen-Fallback für Aruba-6100-Switches
 
 ## Verwendung
 
