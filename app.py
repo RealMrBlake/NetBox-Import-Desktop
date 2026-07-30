@@ -213,9 +213,13 @@ class VRFSelectionDialog(tk.Toplevel):
             wraplength=490,
             justify="left",
         ).pack(anchor="w", pady=(8, 14))
-        ttk.Combobox(body, textvariable=self.selection, values=values, state="readonly").pack(fill="x")
-        ttk.Label(body, text="Name bei automatischer Erstellung").pack(anchor="w", pady=(14, 4))
-        ttk.Entry(body, textvariable=self.new_vrf_name).pack(fill="x")
+        selection_combo = ttk.Combobox(body, textvariable=self.selection, values=values, state="readonly")
+        selection_combo.pack(fill="x")
+        selection_combo.bind("<<ComboboxSelected>>", self.update_name_field)
+        self.name_frame = ttk.Frame(body)
+        ttk.Label(self.name_frame, text="Name der neuen VRF").pack(anchor="w", pady=(14, 4))
+        ttk.Entry(self.name_frame, textvariable=self.new_vrf_name).pack(fill="x")
+        self.update_name_field()
 
         buttons = ttk.Frame(body)
         buttons.pack(anchor="e", pady=(22, 0))
@@ -223,6 +227,12 @@ class VRFSelectionDialog(tk.Toplevel):
         ttk.Button(buttons, text="VRF bestätigen", command=self.accept, style="Primary.TButton").pack(side="left", padx=4)
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.wait_window(self)
+
+    def update_name_field(self, _event=None):
+        if self.selection.get() == self.AUTO_CREATE:
+            self.name_frame.pack(fill="x")
+        else:
+            self.name_frame.pack_forget()
 
     def accept(self):
         selected = self.selection.get()
@@ -391,6 +401,180 @@ class PrefixCreationDialog(tk.Toplevel):
             "create_vrf": create_vrf,
             "vrf_name": vrf_name,
         }
+        self.destroy()
+
+
+class DetectedNetworksDialog(tk.Toplevel):
+    """Review all newly detected networks and their VRFs in one import plan."""
+
+    AUTO_CREATE = "➕ Neue VRF anlegen"
+
+    def __init__(self, parent, networks, vrfs, default_vrf_id, tenant_name):
+        super().__init__(parent)
+        self.title("Neue Netzwerke prüfen")
+        self.geometry("1060x620")
+        self.minsize(900, 480)
+        self.transient(parent)
+        self.grab_set()
+        self.result = None
+        self.rows = []
+        self.vrf_map = {}
+
+        vrf_values = []
+        for vrf in vrfs:
+            rd = getattr(vrf, "rd", None)
+            display = f"{vrf.name} (RD: {rd})" if rd else vrf.name
+            self.vrf_map[display] = vrf.id
+            vrf_values.append(display)
+        vrf_values.append(self.AUTO_CREATE)
+        default_vrf = next(
+            (display for display, vrf_id in self.vrf_map.items() if vrf_id == default_vrf_id),
+            vrf_values[0],
+        )
+
+        body = ttk.Frame(self, padding=20)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="Neue Netzwerke erkannt", font=("Segoe UI Semibold", 16)).pack(anchor="w")
+        ttk.Label(
+            body,
+            text=(
+                "Nur noch nicht vorhandene Netze werden angezeigt. Subnetzgröße und VRF können pro Netz geändert "
+                "werden. Bei ‚Neue VRF anlegen‘ erscheint ein Namensfeld in derselben Zeile."
+            ),
+            wraplength=980,
+            foreground="#52606d",
+        ).pack(anchor="w", pady=(5, 14))
+
+        header = ttk.Frame(body)
+        header.pack(fill="x", padx=(2, 20))
+        ttk.Label(header, text="Anlegen", width=8).grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text="Erkannte IP", width=21).grid(row=0, column=1, sticky="w")
+        ttk.Label(header, text="Größe", width=9).grid(row=0, column=2, sticky="w")
+        ttk.Label(header, text="Netzwerk", width=25).grid(row=0, column=3, sticky="w")
+        ttk.Label(header, text="VRF", width=34).grid(row=0, column=4, sticky="w")
+
+        container = ttk.Frame(body)
+        container.pack(fill="both", expand=True, pady=(4, 10))
+        canvas = tk.Canvas(container, borderwidth=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        self.rows_frame = ttk.Frame(canvas)
+        self.rows_frame.bind(
+            "<Configure>",
+            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        window_id = canvas.create_window((0, 0), window=self.rows_frame, anchor="nw")
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window_id, width=event.width))
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        for index, item in enumerate(networks):
+            self.add_network_row(index, item, vrf_values, default_vrf, tenant_name)
+
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x")
+        ttk.Button(buttons, text="Import abbrechen", command=self.destroy).pack(side="left")
+        ttk.Button(buttons, text="Ohne neue Netze fortfahren", command=self.skip_all).pack(side="right", padx=(8, 0))
+        ttk.Button(buttons, text="Auswahl übernehmen", command=self.accept, style="Primary.TButton").pack(side="right")
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.wait_window(self)
+
+    def add_network_row(self, index, item, vrf_values, default_vrf, tenant_name):
+        row_frame = ttk.Frame(self.rows_frame, padding=(4, 7))
+        row_frame.pack(fill="x")
+        enabled = tk.BooleanVar(value=True)
+        prefix_length = tk.StringVar(value=f"/{item['suggested_prefixlen']}")
+        network_text = tk.StringVar()
+        vrf_selection = tk.StringVar(value=default_vrf)
+        new_vrf_name = tk.StringVar(value=f"{tenant_name} - {item['suggested_network'].network_address}")
+
+        ttk.Checkbutton(row_frame, variable=enabled).grid(row=0, column=0, sticky="w", padx=(0, 12))
+        ttk.Label(row_frame, text=str(item["host_address"]), width=21).grid(row=0, column=1, sticky="w")
+        choices = self.prefix_choices(item["host_address"], item["detected_prefixlen"])
+        size_combo = ttk.Combobox(row_frame, textvariable=prefix_length, values=choices, state="readonly", width=7)
+        size_combo.grid(row=0, column=2, sticky="w", padx=(0, 12))
+        ttk.Label(row_frame, textvariable=network_text, width=25).grid(row=0, column=3, sticky="w")
+        vrf_combo = ttk.Combobox(
+            row_frame,
+            textvariable=vrf_selection,
+            values=vrf_values,
+            state="readonly",
+            width=34,
+        )
+        vrf_combo.grid(row=0, column=4, sticky="ew")
+        row_frame.columnconfigure(4, weight=1)
+
+        name_frame = ttk.Frame(row_frame)
+        ttk.Label(name_frame, text="Name der neuen VRF:").pack(side="left")
+        ttk.Entry(name_frame, textvariable=new_vrf_name).pack(side="left", fill="x", expand=True, padx=(8, 0))
+
+        row = {
+            "frame": row_frame,
+            "enabled": enabled,
+            "host_address": item["host_address"],
+            "prefix_length": prefix_length,
+            "network_text": network_text,
+            "vrf_selection": vrf_selection,
+            "new_vrf_name": new_vrf_name,
+            "name_frame": name_frame,
+        }
+        self.rows.append(row)
+
+        size_combo.bind("<<ComboboxSelected>>", lambda _event, current=row: self.update_row(current))
+        vrf_combo.bind("<<ComboboxSelected>>", lambda _event, current=row: self.update_row(current))
+        self.update_row(row)
+
+    @staticmethod
+    def prefix_choices(host_address, detected_prefixlen):
+        host = ipaddress.ip_address(host_address)
+        if host.version == 4:
+            return [f"/{length}" for length in range(8, 25)]
+        common = {32, 40, 48, 52, 56, 60, 64, 80, 96, 112, 120, 124, 126, 127, 128, detected_prefixlen}
+        return [f"/{length}" for length in sorted(common)]
+
+    def update_row(self, row):
+        length = int(row["prefix_length"].get().lstrip("/"))
+        network = ipaddress.ip_network(f"{row['host_address']}/{length}", strict=False)
+        row["network_text"].set(str(network))
+        if row["vrf_selection"].get() == self.AUTO_CREATE:
+            row["name_frame"].grid(row=1, column=4, sticky="ew", pady=(7, 0))
+        else:
+            row["name_frame"].grid_remove()
+
+    def skip_all(self):
+        self.result = []
+        self.destroy()
+
+    def accept(self):
+        decisions = {}
+        for row in self.rows:
+            if not row["enabled"].get():
+                continue
+            network = row["network_text"].get()
+            selected_vrf = row["vrf_selection"].get()
+            if selected_vrf == self.AUTO_CREATE:
+                vrf_name = row["new_vrf_name"].get().strip()
+                if not vrf_name:
+                    messagebox.showwarning("VRF-Name fehlt", f"Bitte für {network} einen VRF-Namen eingeben.", parent=self)
+                    return
+                decision = {"network": network, "vrf_id": None, "create_vrf": True, "vrf_name": vrf_name}
+            else:
+                decision = {
+                    "network": network,
+                    "vrf_id": self.vrf_map[selected_vrf],
+                    "create_vrf": False,
+                    "vrf_name": None,
+                }
+            existing = decisions.get(network)
+            if existing and existing != decision:
+                messagebox.showwarning(
+                    "Netzwerk doppelt",
+                    f"{network} wurde mit unterschiedlichen VRFs ausgewählt.",
+                    parent=self,
+                )
+                return
+            decisions[network] = decision
+        self.result = list(decisions.values())
         self.destroy()
 
 
@@ -663,7 +847,6 @@ class NetBoxVMImporter:
         buttons = ttk.Frame(main)
         buttons.grid(row=5, column=0, sticky="ew", pady=10)
         ttk.Button(buttons, text="Alle auswählen", command=self.select_all).pack(side="left")
-        ttk.Button(buttons, text="VRFs & Netzwerke", command=self.open_network_manager).pack(side="left", padx=8)
         ttk.Button(buttons, text="Import / Sync starten", command=self.import_vms, style="Primary.TButton").pack(side="right")
 
         log_card = ttk.LabelFrame(main, text="Aktivitätsprotokoll", style="Card.TLabelframe")
@@ -1232,7 +1415,11 @@ class NetBoxVMImporter:
             self.log("Synchronisierung ohne VRF-Auswahl abgebrochen")
             return
         self.synced_prefixes = set()
-        self.prefix_decisions = {}
+        prefix_plans = self.prepare_network_import(selected, tenant_name, tenant_id, vrf_id)
+        if prefix_plans is None:
+            self.log("Synchronisierung in der Netzwerkprüfung abgebrochen")
+            return
+        self.prefix_plans = prefix_plans
         failures = []
         for item_id in selected:
             vm_data = self.vms[int(item_id)]
@@ -1278,6 +1465,81 @@ class NetBoxVMImporter:
             ),
             key=lambda item: item.name.casefold(),
         )
+
+    def prepare_network_import(self, selected_items, tenant_name, tenant_id, default_vrf_id):
+        detected = {}
+        for item_id in selected_items:
+            vm_data = self.vms[int(item_id)]
+            for interface in vm_data.get("interfaces", []):
+                for ip_value in dict.fromkeys(interface.get("ips", [])):
+                    address = self.ip_with_prefix(ip_value)
+                    if not address:
+                        continue
+                    parsed = ipaddress.ip_interface(address)
+                    if parsed.version == 4:
+                        suggested_prefixlen = 24
+                    else:
+                        suggested_prefixlen = parsed.network.prefixlen
+                    suggested_network = ipaddress.ip_network(
+                        f"{parsed.ip}/{suggested_prefixlen}",
+                        strict=False,
+                    )
+                    key = str(suggested_network)
+                    detected.setdefault(
+                        key,
+                        {
+                            "host_address": parsed.ip,
+                            "host_addresses": set(),
+                            "detected_prefixlen": parsed.network.prefixlen,
+                            "suggested_prefixlen": suggested_prefixlen,
+                            "suggested_network": suggested_network,
+                        },
+                    )["host_addresses"].add(parsed.ip)
+
+        tenant_vrf_ids = {vrf.id for vrf in self.tenant_vrfs(tenant_id)}
+        self.preexisting_prefixes = []
+        missing = []
+        for item in detected.values():
+            group_is_missing = False
+            for host in item["host_addresses"]:
+                covering = self.find_covering_prefixes(host, tenant_vrf_ids)
+                default_matches = [match for match in covering if match[3] == default_vrf_id]
+                matching_vrfs = {match[3] for match in covering}
+                reusable = None
+                if default_matches:
+                    reusable = max(default_matches, key=lambda match: match[0])
+                elif len(matching_vrfs) == 1:
+                    reusable = max(covering, key=lambda match: match[0])
+                if reusable:
+                    _, prefix, existing_network, existing_vrf_id = reusable
+                    cached = (prefix, existing_network, existing_vrf_id)
+                    if cached not in self.preexisting_prefixes:
+                        self.preexisting_prefixes.append(cached)
+                else:
+                    group_is_missing = True
+            if group_is_missing:
+                missing.append(item)
+
+        if not missing:
+            self.log("Keine neuen Netzwerke erkannt")
+            return []
+
+        dialog = DetectedNetworksDialog(
+            self.root,
+            missing,
+            self.tenant_vrfs(tenant_id),
+            default_vrf_id,
+            tenant_name,
+        )
+        if dialog.result is None:
+            return None
+
+        for decision in dialog.result:
+            if decision.get("create_vrf"):
+                decision["vrf_id"] = self.get_or_create_tenant_vrf(decision["vrf_name"], tenant_id)
+                decision["create_vrf"] = False
+        self.log(f"Netzwerkplan bestätigt: {len(dialog.result)} neue(s) Netzwerk(e)")
+        return dialog.result
 
     def open_network_manager(self):
         if self.nb is None or not self.tenant_map:
@@ -1468,15 +1730,22 @@ class NetBoxVMImporter:
         return matches
 
     def sync_prefix_tenant(self, address, tenant_id, prefix_is_detected, default_vrf_id):
-        """Assign a tenant, choose a VRF, and ask before creating a missing prefix."""
+        """Assign a tenant and apply the previously confirmed network import plan."""
         if not hasattr(self, "synced_prefixes"):
             self.synced_prefixes = set()
-        if not hasattr(self, "prefix_decisions"):
-            self.prefix_decisions = {}
+        if not hasattr(self, "prefix_plans"):
+            self.prefix_plans = []
         parsed_interface = ipaddress.ip_interface(address)
         host_address = parsed_interface.ip
         network = str(parsed_interface.network)
         vrf_id = default_vrf_id
+
+        for existing_prefix, existing_network, existing_vrf_id in getattr(self, "preexisting_prefixes", []):
+            if host_address in ipaddress.ip_network(existing_network):
+                existing_prefix.update({"tenant": tenant_id})
+                self.synced_prefixes.add((existing_network, existing_vrf_id))
+                self.log(f"Vorhandenes Netzwerk wiederverwendet: {existing_network}")
+                return existing_vrf_id
 
         for cached_network, cached_vrf in self.synced_prefixes:
             if host_address in ipaddress.ip_network(cached_network):
@@ -1511,40 +1780,18 @@ class NetBoxVMImporter:
                     self.synced_prefixes.add((existing_network, existing_vrf_id))
                     self.log(f"Vorhandenes Netzwerk wiederverwendet: {existing_network}")
                     return existing_vrf_id
-                decision = self.prefix_decisions.get(cache_key)
-                needs_decision = cache_key not in self.prefix_decisions
-                if decision is not None and host_address not in ipaddress.ip_network(decision["network"]):
-                    needs_decision = True
-                if needs_decision:
-                    tenant_vrfs = self.tenant_vrfs(tenant_id)
-                    tenant_name = next(
-                        (
-                            name for name, mapped_id in getattr(self, "tenant_map", {}).items()
-                            if mapped_id == tenant_id
-                        ),
-                        "Mandant",
-                    )
-                    dialog = PrefixCreationDialog(
-                        self.root,
-                        address,
-                        detected_prefix=prefix_is_detected,
-                        vrfs=tenant_vrfs,
-                        default_vrf_id=vrf_id,
-                        tenant_name=tenant_name,
-                    )
-                    self.prefix_decisions[cache_key] = dialog.result
-                decision = self.prefix_decisions[cache_key]
-                if decision is None:
-                    self.log(f"Präfix für {host_address} nicht angelegt (Benutzerauswahl)")
+                matching_plans = [
+                    decision for decision in self.prefix_plans
+                    if host_address in ipaddress.ip_network(decision["network"])
+                ]
+                if not matching_plans:
+                    self.log(f"Präfix für {host_address} nicht angelegt (Netzwerkplan)")
                     return vrf_id
-
+                decision = max(
+                    matching_plans,
+                    key=lambda item: ipaddress.ip_network(item["network"]).prefixlen,
+                )
                 network = decision["network"]
-                if decision.get("create_vrf"):
-                    decision["vrf_id"] = self.get_or_create_tenant_vrf(
-                        decision["vrf_name"],
-                        tenant_id,
-                    )
-                    decision["create_vrf"] = False
                 vrf_id = decision["vrf_id"]
                 cache_key = (network, vrf_id)
                 selected_candidates = self.find_prefixes_in_vrf(network, vrf_id)
