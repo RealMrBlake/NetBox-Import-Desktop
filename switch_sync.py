@@ -58,9 +58,11 @@ def _clean_output(value):
     return value
 
 
-def _read_available(channel, timeout=20):
+def _read_available(channel, timeout=20, initialize_session=False):
     chunks = []
     started = time.monotonic()
+    next_nudge = started + 0.5
+    nudges = 0
     while time.monotonic() - started < timeout:
         if channel.recv_ready():
             chunks.append(channel.recv(65535).decode("utf-8", errors="replace"))
@@ -70,11 +72,21 @@ def _read_available(channel, timeout=20):
             current = _clean_output("".join(chunks))
             if CLI_PROMPT.search(current):
                 break
-        else:
-            time.sleep(0.05)
+        now = time.monotonic()
+        if initialize_session and nudges < 3 and now >= next_nudge:
+            # ArubaOS-S may stop at the login/registration banner until a key
+            # is pressed. Some WC releases need Enter two or three times.
+            channel.send("\r")
+            nudges += 1
+            next_nudge = now + 1.5
+        time.sleep(0.05)
     output = _clean_output("".join(chunks))
     if not CLI_PROMPT.search(output):
-        raise TimeoutError("Der Switch hat die CLI-Ausgabe nicht mit einem vollständigen Prompt abgeschlossen.")
+        tail = " | ".join(line.strip() for line in output.splitlines()[-3:] if line.strip())
+        detail = f" Letzte Ausgabe: {tail[-300:]}" if tail else " Keine Ausgabe vom Switch empfangen."
+        raise TimeoutError(
+            "Der Switch hat die CLI-Ausgabe nicht mit einem vollständigen Prompt abgeschlossen." + detail
+        )
     return output
 
 
@@ -83,7 +95,7 @@ def _run_cli_command(channel, command, timeout=20):
     try:
         return _read_available(channel, timeout=timeout)
     except TimeoutError as error:
-        raise TimeoutError(f"CLI-Befehl nicht vollständig abgeschlossen: {command}") from error
+        raise TimeoutError(f"CLI-Befehl nicht vollständig abgeschlossen: {command}. {error}") from error
 
 
 def run_switch_commands(config):
@@ -106,9 +118,11 @@ def run_switch_commands(config):
         )
         channel = client.invoke_shell(width=240, height=1000)
         try:
-            _read_available(channel, timeout=30)
+            _read_available(channel, timeout=45, initialize_session=True)
         except TimeoutError as error:
-            raise TimeoutError("SSH-Anmeldung nicht mit einem vollständigen CLI-Prompt abgeschlossen") from error
+            raise TimeoutError(
+                f"SSH-Anmeldung nicht mit einem vollständigen CLI-Prompt abgeschlossen. {error}"
+            ) from error
         pager_command, interface_command, neighbor_command = COMMANDS[platform]
         _run_cli_command(channel, pager_command)
 
