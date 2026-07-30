@@ -15,7 +15,7 @@ PLATFORMS = {
 
 COMMANDS = {
     "aruba_cx": ("no page", "show interface brief", "show lldp neighbor-info detail"),
-    "aruba_aos": ("no page", "show interfaces brief", "show lldp info remote-device"),
+    "aruba_aos": ("no page", "show interfaces brief", "show lldp info remote-device detail"),
     "hpe_comware": ("screen-length disable", "display interface brief", "display lldp neighbor-information verbose"),
 }
 
@@ -327,20 +327,25 @@ def parse_neighbors(output):
         system_name = _field(block, (
             r"^\s*Neighbor Chassis-Name\s*:\s*(.+)$",
             r"^[ \t]*Neighbor System-Name[ \t]*:[ \t]*(.*)$",
-            r"^\s*(?:System Name|SysName)\s*[: ]\s*(.+)$",
+            r"^[ \t]*(?:System Name|SysName)[ \t]*:[ \t]*(.*)$",
             r"^\s*Neighbor name\s*[: ]\s*(.+)$",
         ))
         if not system_name:
-            system_name = _field(block, (r"^\s*Neighbor Chassis-ID\s*:\s*(.+)$",))
+            system_name = _field(block, (
+                r"^[ \t]*Neighbor Chassis-ID[ \t]*:[ \t]*(.+)$",
+                r"^[ \t]*ChassisId[ \t]*:[ \t]*(.+)$",
+            ))
         remote_port = _field(block, (
             r"^\s*Neighbor Port-ID\s*:\s*(.+)$",
             r"^\s*Neighbor Port-Desc\s*:\s*(.+)$",
-            r"^\s*(?:Port ID|PortId|Port ID subtype.*\n\s*Port ID)\s*[: ]\s*(.+)$",
+            r"^[ \t]*(?:Port ID|PortId)[ \t]*:[ \t]*(.*)$",
+            r"^\s*Port ID subtype.*\n\s*Port ID\s*[: ]\s*(.+)$",
             r"^\s*(?:Port Description|PortDesc)\s*[: ]\s*(.+)$",
         ))
         management_ip = _field(block, (
             r"^\s*Neighbor Management-Address\s*:\s*([0-9a-fA-F:.]+)",
             r"^\s*(?:Management Address|Management address|Management IP)\s*[: ]\s*([0-9a-fA-F:.]+)",
+            r"^[ \t]*Address[ \t]*:[ \t]*([0-9a-fA-F:.]+)[ \t]*$",
         ))
         if local_port and (system_name or remote_port):
             neighbors.append({
