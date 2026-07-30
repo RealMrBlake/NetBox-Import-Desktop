@@ -45,6 +45,7 @@ LLDP_CONTROL = {
 
 ANSI_ESCAPE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 MAC_PATTERN = re.compile(r"(?i)\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b|\b[0-9a-f]{4}(?:-[0-9a-f]{4}){2}\b")
+CLI_PROMPT = re.compile(r"(?:^|\n)[^\r\n]*[>#][ \t]*(?:\n)?\Z")
 
 
 def _clean_output(value):
@@ -53,26 +54,24 @@ def _clean_output(value):
     return value
 
 
-def _read_available(channel, quiet_seconds=0.8, timeout=20):
+def _read_available(channel, timeout=20):
     chunks = []
     started = time.monotonic()
-    last_data = started
     while time.monotonic() - started < timeout:
         if channel.recv_ready():
             chunks.append(channel.recv(65535).decode("utf-8", errors="replace"))
-            last_data = time.monotonic()
             # Interactive AOS-CX/AOS-S/Comware commands are complete when the
             # device prompt returns. This avoids truncating output at a short
             # pause while also avoiding a fixed delay after every command.
-            if re.search(r"(?m)^\s*[^\r\n]+[>#]\s*$", "".join(chunks)):
+            current = _clean_output("".join(chunks))
+            if CLI_PROMPT.search(current):
                 break
-        elif chunks and time.monotonic() - last_data >= quiet_seconds:
-            break
-        elif not chunks and time.monotonic() - started >= min(timeout, 5):
-            break
         else:
             time.sleep(0.05)
-    return _clean_output("".join(chunks))
+    output = _clean_output("".join(chunks))
+    if not CLI_PROMPT.search(output):
+        raise TimeoutError("Der Switch hat die CLI-Ausgabe nicht mit einem vollständigen Prompt abgeschlossen.")
+    return output
 
 
 def run_switch_commands(config):
@@ -94,7 +93,7 @@ def run_switch_commands(config):
             banner_timeout=12,
         )
         channel = client.invoke_shell(width=240, height=1000)
-        _read_available(channel, quiet_seconds=0.5, timeout=5)
+        _read_available(channel, timeout=30)
         pager_command, interface_command, neighbor_command = COMMANDS[platform]
         channel.send(pager_command + "\n")
         _read_available(channel)
@@ -123,20 +122,20 @@ def run_switch_commands(config):
             time.sleep(2)
 
         channel.send(interface_command + "\n")
-        interfaces = _read_available(channel, quiet_seconds=1.2, timeout=30)
+        interfaces = _read_available(channel, timeout=30)
         ip_outputs = []
         for command in IP_COMMANDS[platform]:
             channel.send(command + "\n")
-            ip_outputs.append(_read_available(channel, quiet_seconds=1.0, timeout=25))
+            ip_outputs.append(_read_available(channel, timeout=25))
         channel.send(neighbor_command + "\n")
-        neighbors = _read_available(channel, quiet_seconds=1.5, timeout=35)
+        neighbors = _read_available(channel, timeout=35)
         if platform == "aruba_cx" and re.search(r"(?i)invalid input|unknown command|unrecognized", neighbors):
             channel.send("show lldp neighbor-info\n")
-            neighbors = _read_available(channel, quiet_seconds=1.5, timeout=35)
+            neighbors = _read_available(channel, timeout=35)
         cdp_neighbors = ""
         if platform == "aruba_cx":
             channel.send("show cdp neighbor-info\n")
-            cdp_summary = _read_available(channel, quiet_seconds=1.2, timeout=25)
+            cdp_summary = _read_available(channel, timeout=25)
             cdp_ports = []
             for line in cdp_summary.splitlines():
                 match = re.match(r"^\s*(\d+/\d+/\d+)\s+\S+", line)
@@ -145,7 +144,7 @@ def run_switch_commands(config):
             details = []
             for port in cdp_ports:
                 channel.send(f"show cdp neighbor-info {port}\n")
-                details.append(_read_available(channel, quiet_seconds=1.0, timeout=20))
+                details.append(_read_available(channel, timeout=20))
             cdp_neighbors = "\n".join([cdp_summary, *details])
         return {
             "interfaces": interfaces,
@@ -169,7 +168,10 @@ def _normalize_mac(value):
 
 
 def _speed_mbps(line):
-    matches = re.findall(r"(?i)\b(\d+(?:\.\d+)?)\s*(T|G|M)(?:b(?:it)?|bps)?\b", line)
+    matches = re.findall(
+        r"(?i)\b(\d+(?:\.\d+)?)\s*(T|G|M)(?:b(?:it)?|bps)?(?:T|X|SR|LR|CR)?\b",
+        line,
+    )
     if not matches:
         duplex = re.search(r"(?i)\b(\d+)(?:FDx|HDx)\b", line)
         if duplex:
