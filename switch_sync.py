@@ -43,13 +43,17 @@ LLDP_CONTROL = {
     },
 }
 
-ANSI_ESCAPE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+ANSI_ESCAPE = re.compile(
+    r"\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|[@-_]|[=>])"
+)
+TERMINAL_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 MAC_PATTERN = re.compile(r"(?i)\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b|\b[0-9a-f]{4}(?:-[0-9a-f]{4}){2}\b")
 CLI_PROMPT = re.compile(r"(?:^|\n)[^\r\n]*[>#][ \t]*(?:\n)?\Z")
 
 
 def _clean_output(value):
     value = ANSI_ESCAPE.sub("", value).replace("\r", "")
+    value = TERMINAL_CONTROL.sub("", value)
     value = re.sub(r"--\s*MORE\s*--|Press any key to continue.*", "", value, flags=re.I)
     return value
 
@@ -74,6 +78,14 @@ def _read_available(channel, timeout=20):
     return output
 
 
+def _run_cli_command(channel, command, timeout=20):
+    channel.send(command + "\n")
+    try:
+        return _read_available(channel, timeout=timeout)
+    except TimeoutError as error:
+        raise TimeoutError(f"CLI-Befehl nicht vollständig abgeschlossen: {command}") from error
+
+
 def run_switch_commands(config):
     platform = config["platform"]
     if platform not in COMMANDS:
@@ -93,49 +105,41 @@ def run_switch_commands(config):
             banner_timeout=12,
         )
         channel = client.invoke_shell(width=240, height=1000)
-        _read_available(channel, timeout=30)
+        try:
+            _read_available(channel, timeout=30)
+        except TimeoutError as error:
+            raise TimeoutError("SSH-Anmeldung nicht mit einem vollständigen CLI-Prompt abgeschlossen") from error
         pager_command, interface_command, neighbor_command = COMMANDS[platform]
-        channel.send(pager_command + "\n")
-        _read_available(channel)
+        _run_cli_command(channel, pager_command)
 
         control = LLDP_CONTROL[platform]
-        channel.send(control["status"] + "\n")
-        lldp_status = _read_available(channel)
+        lldp_status = _run_cli_command(channel, control["status"])
         lldp_enabled_automatically = bool(re.search(control["disabled"], lldp_status, flags=re.I))
         if lldp_enabled_automatically:
             enable_output = []
             for command in control["enable"]:
-                channel.send(command + "\n")
-                enable_output.append(_read_available(channel))
+                enable_output.append(_run_cli_command(channel, command))
             combined = "\n".join(enable_output)
             if platform == "hpe_comware" and re.search(r"(?i)unrecognized|invalid|wrong parameter", combined):
-                channel.send("system-view\n")
-                _read_available(channel)
-                channel.send("lldp enable\n")
-                combined = _read_available(channel)
-                channel.send("return\n")
-                combined += "\n" + _read_available(channel)
+                _run_cli_command(channel, "system-view")
+                combined = _run_cli_command(channel, "lldp enable")
+                combined += "\n" + _run_cli_command(channel, "return")
             if re.search(r"(?i)permission denied|authorization failed|access denied", combined):
                 raise PermissionError("LLDP konnte mangels Konfigurationsrechten nicht aktiviert werden.")
             if re.search(r"(?i)unrecognized|invalid input|unknown command|wrong parameter", combined):
                 raise RuntimeError("Der LLDP-Aktivierungsbefehl wird von diesem Switch nicht unterstützt.")
             time.sleep(2)
 
-        channel.send(interface_command + "\n")
-        interfaces = _read_available(channel, timeout=30)
+        interfaces = _run_cli_command(channel, interface_command, timeout=45)
         ip_outputs = []
         for command in IP_COMMANDS[platform]:
-            channel.send(command + "\n")
-            ip_outputs.append(_read_available(channel, timeout=25))
-        channel.send(neighbor_command + "\n")
-        neighbors = _read_available(channel, timeout=35)
+            ip_outputs.append(_run_cli_command(channel, command, timeout=35))
+        neighbors = _run_cli_command(channel, neighbor_command, timeout=60)
         if platform == "aruba_cx" and re.search(r"(?i)invalid input|unknown command|unrecognized", neighbors):
-            channel.send("show lldp neighbor-info\n")
-            neighbors = _read_available(channel, timeout=35)
+            neighbors = _run_cli_command(channel, "show lldp neighbor-info", timeout=60)
         cdp_neighbors = ""
         if platform == "aruba_cx":
-            channel.send("show cdp neighbor-info\n")
-            cdp_summary = _read_available(channel, timeout=25)
+            cdp_summary = _run_cli_command(channel, "show cdp neighbor-info", timeout=35)
             cdp_ports = []
             for line in cdp_summary.splitlines():
                 match = re.match(r"^\s*(\d+/\d+/\d+)\s+\S+", line)
@@ -143,8 +147,7 @@ def run_switch_commands(config):
                     cdp_ports.append(match.group(1))
             details = []
             for port in cdp_ports:
-                channel.send(f"show cdp neighbor-info {port}\n")
-                details.append(_read_available(channel, timeout=20))
+                details.append(_run_cli_command(channel, f"show cdp neighbor-info {port}", timeout=30))
             cdp_neighbors = "\n".join([cdp_summary, *details])
         return {
             "interfaces": interfaces,
