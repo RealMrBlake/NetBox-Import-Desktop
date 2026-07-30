@@ -1,6 +1,6 @@
 # NetBox VM Import Desktop
 
-Windows-Desktopanwendung zum Importieren und Synchronisieren virtueller Maschinen aus VMware ESXi/vSphere und Proxmox VE nach NetBox.
+Windows-Desktopanwendung zum Synchronisieren virtueller Maschinen sowie HPE-/Aruba-Switche nach NetBox.
 
 ## Funktionen
 
@@ -16,6 +16,10 @@ Windows-Desktopanwendung zum Importieren und Synchronisieren virtueller Maschine
 - Optionale Unterstützung selbstsignierter TLS-Zertifikate
 - Synchronisierung von VMs, Hardwaredaten, Interfaces und IP-Adressen
 - Übernahme primärer IPv4- und IPv6-Adressen
+- Getrennte Haupt-Tabs für Virtualisierung und Switche
+- Verschlüsselte SSH-Zugänge pro bestehendem NetBox-Switch
+- SSH-Erkennung für Aruba CX, ArubaOS-Switch/ProCurve und HPE Comware
+- Synchronisierung von Switch-Schnittstellen und optionalen LLDP-Verbindungen als NetBox-Kabel
 
 ## Verwendung
 

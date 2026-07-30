@@ -83,6 +83,7 @@ class ProfileStore:
                 "netbox_token": unprotect(record.get("netbox_token_encrypted", "")),
                 "netbox_ignore_ssl": bool(record.get("netbox_ignore_ssl", record.get("ignore_ssl_errors", False))),
                 "sources": [],
+                "switches": [],
             }
             for source_record in record.get("sources", []):
                 source = dict(source_record)
@@ -91,6 +92,13 @@ class ProfileStore:
                     if encrypted_key in source:
                         source[key] = unprotect(source.pop(encrypted_key))
                 profile["sources"].append(source)
+            for switch_record in record.get("switches", []):
+                switch = dict(switch_record)
+                for key in SECRET_KEYS:
+                    encrypted_key = f"{key}_encrypted"
+                    if encrypted_key in switch:
+                        switch[key] = unprotect(switch.pop(encrypted_key))
+                profile["switches"].append(switch)
 
             # Migration from v2: one VMware source embedded in each profile.
             if not profile["sources"] and record.get("esxi_host"):
@@ -123,6 +131,7 @@ class ProfileStore:
                     "password": data.get("esxi_password", ""),
                     "ignore_ssl": bool(data.get("ignore_ssl_errors", False)),
                 }],
+                "switches": [],
             }
         return profiles, data.get("active_profile", "")
 
@@ -137,15 +146,23 @@ class ProfileStore:
                     if key in source_data:
                         source[f"{key}_encrypted"] = protect(source_data.get(key, ""))
                 sources.append(source)
+            switches = []
+            for switch_data in profile.get("switches", []):
+                switch = {key: value for key, value in switch_data.items() if key not in SECRET_KEYS}
+                for key in SECRET_KEYS:
+                    if key in switch_data:
+                        switch[f"{key}_encrypted"] = protect(switch_data.get(key, ""))
+                switches.append(switch)
             records.append({
                 "name": name,
                 "netbox_url": profile.get("netbox_url", ""),
                 "netbox_token_encrypted": protect(profile.get("netbox_token", "")),
                 "netbox_ignore_ssl": bool(profile.get("netbox_ignore_ssl", False)),
                 "sources": sources,
+                "switches": switches,
             })
 
-        payload = {"version": 3, "active_profile": active_profile, "profiles": records}
+        payload = {"version": 4, "active_profile": active_profile, "profiles": records}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = self.path.with_suffix(".tmp")
         with temp_path.open("w", encoding="utf-8") as stream:

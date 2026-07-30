@@ -13,6 +13,7 @@ from pyVim.connect import Disconnect, SmartConnect
 from pyVmomi import vim
 
 from profile_store import ProfileStore
+from switch_sync import PLATFORMS, discover_switch, sync_snapshot_to_netbox
 
 
 class SourceDialog(tk.Toplevel):
@@ -131,6 +132,112 @@ class SourceDialog(tk.Toplevel):
                 "url": endpoint.rstrip("/"), "token_id": identity,
                 "token_secret": secret, "include_lxc": self.include_lxc.get(),
             })
+        self.destroy()
+
+
+class SwitchSourceDialog(tk.Toplevel):
+    """Editor for one existing NetBox switch and its SSH connection."""
+
+    def __init__(self, parent, devices, switch=None):
+        super().__init__(parent)
+        self.title("Switch-Zugang")
+        self.geometry("560x500")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self.result = None
+        switch = switch or {}
+        self.switch_id = switch.get("id", uuid.uuid4().hex)
+        self.enabled = tk.BooleanVar(value=switch.get("enabled", True))
+        self.platform = tk.StringVar(value=switch.get("platform", "aruba_cx"))
+        self.device_map = {}
+
+        device_values = []
+        selected_device = ""
+        for device in devices:
+            site = getattr(getattr(device, "site", None), "name", "")
+            display = f"{device.name} · {site}" if site else device.name
+            self.device_map[display] = (device.id, device.name)
+            device_values.append(display)
+            if device.id == switch.get("device_id"):
+                selected_device = display
+
+        body = ttk.Frame(self, padding=22)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+        ttk.Label(body, text="NetBox-Gerät").grid(row=0, column=0, sticky="w", padx=(0, 12), pady=7)
+        self.device_selection = tk.StringVar(value=selected_device)
+        ttk.Combobox(
+            body,
+            textvariable=self.device_selection,
+            values=device_values,
+            state="readonly",
+        ).grid(row=0, column=1, sticky="ew", pady=7)
+
+        ttk.Label(body, text="Plattform").grid(row=1, column=0, sticky="w", padx=(0, 12), pady=7)
+        platform_map = {label: key for key, label in PLATFORMS.items()}
+        self.platform_map = platform_map
+        platform_display = tk.StringVar(value=PLATFORMS[self.platform.get()])
+        self.platform_display = platform_display
+        ttk.Combobox(
+            body,
+            textvariable=platform_display,
+            values=list(platform_map),
+            state="readonly",
+        ).grid(row=1, column=1, sticky="ew", pady=7)
+
+        self.host_entry = self.add_entry(body, 2, "Host / IP", switch.get("host", ""))
+        self.port_entry = self.add_entry(body, 3, "SSH-Port", str(switch.get("port", 22)))
+        self.username_entry = self.add_entry(body, 4, "Benutzer", switch.get("username", ""))
+        self.password_entry = self.add_entry(body, 5, "Passwort", switch.get("password", ""), secret=True)
+        ttk.Checkbutton(body, text="Switch aktivieren", variable=self.enabled).grid(
+            row=6, column=0, columnspan=2, sticky="w", pady=(12, 4)
+        )
+        ttk.Label(
+            body,
+            text="Das Passwort wird im Kundenprofil mit Windows DPAPI verschlüsselt gespeichert.",
+            foreground="#52606d",
+            wraplength=500,
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        buttons = ttk.Frame(body)
+        buttons.grid(row=8, column=0, columnspan=2, sticky="e", pady=(22, 0))
+        ttk.Button(buttons, text="Abbrechen", command=self.destroy).pack(side="left", padx=4)
+        ttk.Button(buttons, text="Übernehmen", command=self.accept, style="Primary.TButton").pack(side="left", padx=4)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.wait_window(self)
+
+    @staticmethod
+    def add_entry(parent, row, label, value, secret=False):
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=7)
+        entry = ttk.Entry(parent, show="•" if secret else "")
+        entry.grid(row=row, column=1, sticky="ew", pady=7)
+        entry.insert(0, value)
+        return entry
+
+    def accept(self):
+        device = self.device_map.get(self.device_selection.get())
+        host = self.host_entry.get().strip()
+        username = self.username_entry.get().strip()
+        password = self.password_entry.get()
+        try:
+            port = int(self.port_entry.get())
+        except ValueError:
+            port = 0
+        if not device or not host or not username or not password or not 1 <= port <= 65535:
+            messagebox.showwarning("Fehlende Angaben", "Bitte alle Switch-Zugangsdaten korrekt ausfüllen.", parent=self)
+            return
+        device_id, device_name = device
+        self.result = {
+            "id": self.switch_id,
+            "name": device_name,
+            "device_id": device_id,
+            "platform": self.platform_map[self.platform_display.get()],
+            "host": host,
+            "port": port,
+            "username": username,
+            "password": password,
+            "enabled": self.enabled.get(),
+        }
         self.destroy()
 
 
@@ -726,6 +833,9 @@ class NetBoxVMImporter:
         self.vms = []
         self.profiles = {}
         self.current_sources = []
+        self.current_switches = []
+        self.switch_snapshots = {}
+        self.netbox_devices = []
         self.cluster_map = {}
         self.cluster_tenants = {}
         self.tenant_map = {}
@@ -766,7 +876,14 @@ class NetBoxVMImporter:
                 pass
 
     def create_gui(self):
-        main = ttk.Frame(self.root, padding=18)
+        self.main_tabs = ttk.Notebook(self.root)
+        self.main_tabs.pack(fill="both", expand=True)
+        virtualization_tab = ttk.Frame(self.main_tabs)
+        switches_tab = ttk.Frame(self.main_tabs)
+        self.main_tabs.add(virtualization_tab, text="Virtualisierung")
+        self.main_tabs.add(switches_tab, text="Switche")
+
+        main = ttk.Frame(virtualization_tab, padding=18)
         main.pack(fill="both", expand=True)
         main.columnconfigure(0, weight=1)
         main.rowconfigure(4, weight=3)
@@ -854,6 +971,81 @@ class NetBoxVMImporter:
         self.log_text = tk.Text(log_card, height=7, borderwidth=0, bg="#f7f9fb", foreground="#243b53", font=("Consolas", 9), state="disabled")
         self.log_text.pack(fill="both", expand=True)
         ttk.Label(main, textvariable=self.status_text, style="Status.TLabel", anchor="w").grid(row=7, column=0, sticky="ew", pady=(6, 0))
+        self.create_switch_gui(switches_tab)
+
+    def create_switch_gui(self, parent):
+        main = ttk.Frame(parent, padding=18)
+        main.pack(fill="both", expand=True)
+        main.columnconfigure(0, weight=1)
+        main.rowconfigure(2, weight=2)
+        main.rowconfigure(4, weight=3)
+
+        header = ttk.Frame(main)
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        ttk.Label(header, text="HPE & Aruba Switche", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(
+            header,
+            text="Bestehende NetBox-Geräte per SSH auslesen · Profil: ",
+            style="Subtitle.TLabel",
+        ).pack(side="left")
+        ttk.Label(header, textvariable=self.profile_name, style="Subtitle.TLabel").pack(side="left")
+
+        source_card = ttk.LabelFrame(main, text="Switch-Zugänge", style="Card.TLabelframe")
+        source_card.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
+        switch_columns = ("device", "platform", "host", "active")
+        self.switch_tree = ttk.Treeview(source_card, columns=switch_columns, show="headings", height=6)
+        for column, title, width in (
+            ("device", "NetBox-Gerät", 230),
+            ("platform", "Plattform", 210),
+            ("host", "SSH-Host", 260),
+            ("active", "Aktiv", 60),
+        ):
+            self.switch_tree.heading(column, text=title)
+            self.switch_tree.column(column, width=width, anchor="center" if column == "active" else "w")
+        self.switch_tree.pack(fill="both", expand=True)
+        self.switch_tree.bind("<Double-1>", lambda _event: self.edit_switch())
+        source_buttons = ttk.Frame(source_card)
+        source_buttons.pack(fill="x", pady=(8, 0))
+        ttk.Button(source_buttons, text="NetBox-Geräte laden", command=self.load_switch_devices).pack(side="left")
+        ttk.Button(source_buttons, text="Switch hinzufügen", command=self.add_switch).pack(side="left", padx=(8, 4))
+        ttk.Button(source_buttons, text="Bearbeiten", command=self.edit_switch).pack(side="left", padx=4)
+        ttk.Button(source_buttons, text="Entfernen", command=self.remove_switch).pack(side="left", padx=4)
+        ttk.Button(
+            source_buttons,
+            text="Ausgewählte auslesen",
+            command=self.discover_selected_switches,
+            style="Primary.TButton",
+        ).pack(side="right")
+
+        result_card = ttk.LabelFrame(main, text="Schnittstellen & LLDP-Nachbarn", style="Card.TLabelframe")
+        result_card.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
+        result_columns = ("switch", "interface", "state", "speed", "neighbor", "remote_port")
+        self.switch_result_tree = ttk.Treeview(result_card, columns=result_columns, show="headings")
+        result_headings = {
+            "switch": "Switch", "interface": "Schnittstelle", "state": "Status",
+            "speed": "Geschwindigkeit", "neighbor": "LLDP-Nachbar", "remote_port": "Nachbar-Port",
+        }
+        result_widths = {"switch": 180, "interface": 150, "state": 80, "speed": 110, "neighbor": 210, "remote_port": 170}
+        for column in result_columns:
+            self.switch_result_tree.heading(column, text=result_headings[column])
+            self.switch_result_tree.column(column, width=result_widths[column])
+        result_scroll = ttk.Scrollbar(result_card, orient="vertical", command=self.switch_result_tree.yview)
+        self.switch_result_tree.configure(yscrollcommand=result_scroll.set)
+        self.switch_result_tree.pack(side="left", fill="both", expand=True)
+        result_scroll.pack(side="right", fill="y")
+
+        actions = ttk.Frame(main)
+        actions.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        self.create_neighbor_cables = tk.BooleanVar(value=True)
+        ttk.Checkbutton(actions, text="LLDP-Verbindungen als Kabel anlegen", variable=self.create_neighbor_cables).pack(side="left")
+        ttk.Button(actions, text="Nach NetBox synchronisieren", command=self.sync_switches, style="Primary.TButton").pack(side="right")
+
+        log_card = ttk.LabelFrame(main, text="Switch-Protokoll", style="Card.TLabelframe")
+        log_card.grid(row=4, column=0, sticky="nsew")
+        self.switch_log_text = tk.Text(
+            log_card, height=8, borderwidth=0, bg="#f7f9fb", foreground="#243b53", font=("Consolas", 9), state="disabled"
+        )
+        self.switch_log_text.pack(fill="both", expand=True)
 
     @staticmethod
     def add_field(parent, row, label, secret=False):
@@ -901,6 +1093,7 @@ class NetBoxVMImporter:
             "netbox_token": self.netbox_token.get(),
             "netbox_ignore_ssl": self.netbox_ignore_ssl.get(),
             "sources": [dict(source) for source in self.current_sources],
+            "switches": [dict(switch) for switch in self.current_switches],
         }
 
     def populate_profile(self, name):
@@ -909,7 +1102,12 @@ class NetBoxVMImporter:
         self.set_entry(self.netbox_token, profile.get("netbox_token", ""))
         self.netbox_ignore_ssl.set(bool(profile.get("netbox_ignore_ssl", False)))
         self.current_sources = [dict(source) for source in profile.get("sources", [])]
+        self.current_switches = [dict(switch) for switch in profile.get("switches", [])]
+        self.switch_snapshots = {}
         self.refresh_source_tree()
+        self.refresh_switch_tree()
+        if hasattr(self, "switch_result_tree"):
+            self.refresh_switch_results()
         self.clear_loaded_data()
         self.status_text.set(f"Profil „{name}“ geladen")
 
@@ -933,7 +1131,9 @@ class NetBoxVMImporter:
         self.set_entry(self.netbox_token, "")
         self.netbox_ignore_ssl.set(False)
         self.current_sources = []
+        self.current_switches = []
         self.refresh_source_tree()
+        self.refresh_switch_tree()
         self.profiles[name] = self.profile_from_form(name)
         self.refresh_profile_list()
 
@@ -971,7 +1171,9 @@ class NetBoxVMImporter:
             self.set_entry(self.netbox_url, "")
             self.set_entry(self.netbox_token, "")
             self.current_sources = []
+            self.current_switches = []
             self.refresh_source_tree()
+            self.refresh_switch_tree()
 
     def refresh_source_tree(self):
         self.source_tree.delete(*self.source_tree.get_children())
@@ -1011,6 +1213,164 @@ class NetBoxVMImporter:
         if source and messagebox.askyesno("Quelle entfernen", f"Quelle „{source['name']}“ entfernen?"):
             self.current_sources.remove(source)
             self.refresh_source_tree()
+
+    def switch_log(self, text):
+        self.switch_log_text.configure(state="normal")
+        self.switch_log_text.insert(tk.END, f"{text}\n")
+        self.switch_log_text.see(tk.END)
+        self.switch_log_text.configure(state="disabled")
+        self.status_text.set(text)
+        self.root.update()
+
+    def refresh_switch_tree(self):
+        if not hasattr(self, "switch_tree"):
+            return
+        self.switch_tree.delete(*self.switch_tree.get_children())
+        for switch in self.current_switches:
+            self.switch_tree.insert("", "end", iid=switch["id"], values=(
+                switch.get("name", ""),
+                PLATFORMS.get(switch.get("platform"), switch.get("platform", "")),
+                f"{switch.get('host', '')}:{switch.get('port', 22)}",
+                "Ja" if switch.get("enabled", True) else "Nein",
+            ))
+
+    def load_switch_devices(self):
+        try:
+            if not self.netbox_url.get().strip() or not self.netbox_token.get():
+                raise ValueError("Bitte NetBox-URL und API-Token im Tab Virtualisierung eintragen.")
+            if not self.save_profile(show_message=False):
+                return False
+            self.connect_netbox()
+            self.switch_log("Lade vorhandene NetBox-Geräte …")
+            self.netbox_devices = sorted(self.nb.dcim.devices.all(), key=lambda item: item.name.casefold())
+            self.switch_log(f"{len(self.netbox_devices)} NetBox-Geräte geladen")
+            return True
+        except Exception as error:
+            messagebox.showerror("NetBox-Verbindung", str(error), parent=self.root)
+            return False
+
+    def add_switch(self):
+        if not self.netbox_devices and not self.load_switch_devices():
+            return
+        dialog = SwitchSourceDialog(self.root, self.netbox_devices)
+        if dialog.result:
+            self.current_switches.append(dialog.result)
+            self.refresh_switch_tree()
+
+    def selected_switches(self):
+        selected_ids = set(self.switch_tree.selection())
+        return [switch for switch in self.current_switches if switch["id"] in selected_ids]
+
+    def edit_switch(self):
+        selected = self.selected_switches()
+        if len(selected) != 1:
+            messagebox.showinfo("Switch", "Bitte genau einen Switch auswählen.", parent=self.root)
+            return
+        if not self.netbox_devices and not self.load_switch_devices():
+            return
+        current = selected[0]
+        dialog = SwitchSourceDialog(self.root, self.netbox_devices, current)
+        if dialog.result:
+            index = self.current_switches.index(current)
+            self.current_switches[index] = dialog.result
+            self.refresh_switch_tree()
+            self.switch_tree.selection_set(dialog.result["id"])
+
+    def remove_switch(self):
+        selected = self.selected_switches()
+        if not selected:
+            return
+        if not messagebox.askyesno(
+            "Switch entfernen",
+            f"{len(selected)} Switch-Zugang/Zugänge aus dem Profil entfernen?",
+            parent=self.root,
+        ):
+            return
+        selected_ids = {switch["id"] for switch in selected}
+        self.current_switches = [switch for switch in self.current_switches if switch["id"] not in selected_ids]
+        for switch_id in selected_ids:
+            self.switch_snapshots.pop(switch_id, None)
+        self.refresh_switch_tree()
+        self.refresh_switch_results()
+
+    def discover_selected_switches(self):
+        switches = self.selected_switches()
+        if not switches:
+            messagebox.showinfo("Switche", "Bitte mindestens einen Switch auswählen.", parent=self.root)
+            return
+        if not self.save_profile(show_message=False):
+            return
+        failures = []
+        for switch in switches:
+            if not switch.get("enabled", True):
+                continue
+            try:
+                self.switch_log(f"Lese {switch['name']} ({switch['host']}) aus …")
+                snapshot = discover_switch(switch)
+                self.switch_snapshots[switch["id"]] = snapshot
+                self.switch_log(
+                    f"{switch['name']}: {len(snapshot['interfaces'])} Schnittstellen, "
+                    f"{len(snapshot['neighbors'])} LLDP-Nachbarn"
+                )
+            except Exception as error:
+                failures.append(f"{switch['name']}: {error}")
+                self.switch_log(f"FEHLER {switch['name']}: {error}")
+        self.refresh_switch_results()
+        if failures:
+            messagebox.showwarning("Teilweise ausgelesen", "\n".join(failures), parent=self.root)
+
+    def refresh_switch_results(self):
+        self.switch_result_tree.delete(*self.switch_result_tree.get_children())
+        switch_map = {switch["id"]: switch for switch in self.current_switches}
+        for switch_id, snapshot in self.switch_snapshots.items():
+            switch = switch_map.get(switch_id)
+            if not switch:
+                continue
+            for interface in snapshot["interfaces"]:
+                neighbor = interface.get("neighbor") or {}
+                speed = interface.get("speed_mbps")
+                speed_text = f"{speed / 1000:g} Gbit/s" if speed and speed >= 1000 else (f"{speed} Mbit/s" if speed else "")
+                self.switch_result_tree.insert("", "end", values=(
+                    switch["name"],
+                    interface["name"],
+                    "Up" if interface.get("connected") else "Down",
+                    speed_text,
+                    neighbor.get("system_name", ""),
+                    neighbor.get("remote_port", ""),
+                ))
+
+    def sync_switches(self):
+        if not self.switch_snapshots:
+            messagebox.showinfo("Switche", "Bitte zuerst mindestens einen Switch auslesen.", parent=self.root)
+            return
+        if self.nb is None and not self.load_switch_devices():
+            return
+        switch_map = {switch["id"]: switch for switch in self.current_switches}
+        totals = {"created": 0, "updated": 0, "cables": 0}
+        errors = []
+        for switch_id, snapshot in self.switch_snapshots.items():
+            switch = switch_map.get(switch_id)
+            if not switch:
+                continue
+            self.switch_log(f"Synchronisiere {switch['name']} nach NetBox …")
+            result = sync_snapshot_to_netbox(
+                self.nb,
+                switch,
+                snapshot,
+                create_cables=self.create_neighbor_cables.get(),
+            )
+            for key in totals:
+                totals[key] += result[key]
+            errors.extend(f"{switch['name']}: {error}" for error in result["errors"])
+        text = (
+            f"{totals['created']} Schnittstellen erstellt, {totals['updated']} aktualisiert, "
+            f"{totals['cables']} LLDP-Kabel angelegt."
+        )
+        self.switch_log(text)
+        if errors:
+            messagebox.showwarning("Synchronisierung teilweise abgeschlossen", text + "\n\n" + "\n".join(errors), parent=self.root)
+        else:
+            messagebox.showinfo("Switch-Synchronisierung abgeschlossen", text, parent=self.root)
 
     def clear_loaded_data(self):
         self.vms = []
