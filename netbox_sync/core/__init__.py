@@ -1,0 +1,1 @@
+"""UI-independent synchronization logic."""

@@ -1,5 +1,5 @@
-pyvmomi
-pynetbox
-requests
-paramiko
-pyinstaller
+PySide6-Essentials>=6.7
+pynetbox>=7.4
+pyvmomi>=8.0
+requests>=2.31
+paramiko>=3.4
