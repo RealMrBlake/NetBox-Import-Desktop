@@ -164,12 +164,16 @@ QLineEdit:hover, QComboBox:hover, QSpinBox:hover, QPlainTextEdit:hover { border-
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus, QTextEdit:focus { border: 1px solid $accent; }
 QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled { background: $surface_alt; color: $text_faint; }
 QLineEdit[invalid="true"] { border-color: $danger; }
+QComboBox { combobox-popup: 0; }
 QComboBox::drop-down { border: none; width: 26px; }
 QComboBox::down-arrow { image: url($chevron); width: 14px; height: 14px; }
 QComboBox QAbstractItemView {
     background: $surface; border: 1px solid $border_strong; border-radius: 8px; padding: 4px;
     selection-background-color: $accent_soft; selection-color: $text; outline: 0;
 }
+QComboBox QAbstractItemView::item { min-height: 26px; padding: 2px 8px; border-radius: 6px; }
+QComboBox QAbstractItemView::item:hover { background: $hover; }
+QComboBox QAbstractItemView::item:selected { background: $accent_soft; color: $text; }
 QSpinBox::up-button, QSpinBox::down-button { width: 18px; border: none; background: transparent; }
 QSpinBox::up-arrow { image: url($chevron_up); width: 10px; height: 10px; }
 QSpinBox::down-arrow { image: url($chevron); width: 10px; height: 10px; }

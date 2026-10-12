@@ -58,3 +58,29 @@ def test_global_vrf_import():
     engine.sync_vm(VM, cluster_id=1, tenant_id=10, vrf_id=None)
     assert "vrf" not in nb.ipam.prefixes.created[0]
     assert nb.ipam.ip_addresses.created[0]["vrf"] is None
+
+
+def test_match_cluster_by_name_similarity_and_memory():
+    nb, engine = _engine()
+    for index, name in enumerate(("PVE-Prod", "vSphere Cluster RZ2"), start=2):
+        nb.virtualization.clusters.records.append(Record(nb.virtualization.clusters, id=index, name=name, tenant=None))
+    engine.load_targets()
+    assert engine.match_cluster("rz1") == ("RZ1", "name")
+    assert engine.match_cluster("pve_prod") == ("PVE-Prod", "name")
+    assert engine.match_cluster("RZ2") == ("vSphere Cluster RZ2", "similar")
+    assert engine.match_cluster("unbekannt") == (None, None)
+    assert engine.match_cluster("unbekannt", remembered="PVE-Prod") == ("PVE-Prod", "remembered")
+    # A remembered cluster that was deleted in NetBox falls back to matching.
+    assert engine.match_cluster("rz1", remembered="weg") == ("RZ1", "name")
+
+
+def test_create_cluster_with_type():
+    nb, engine = _engine()
+    cluster_id = engine.create_cluster("pve-lab", "Proxmox", tenant_id=10)
+    assert engine.clusters["pve-lab"] == cluster_id
+    assert nb.virtualization.cluster_types.created == [{"name": "Proxmox VE", "slug": "proxmox-ve"}]
+    created = nb.virtualization.clusters.created[0]
+    assert created["name"] == "pve-lab" and created["tenant"] == 10
+    # Type is reused for the next cluster.
+    engine.create_cluster("pve-lab2", "Proxmox")
+    assert len(nb.virtualization.cluster_types.created) == 1

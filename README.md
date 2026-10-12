@@ -29,7 +29,10 @@ Bestehende Kundenprofile der Vorgängerversion („NetBox VM Import“) werden a
 - Mehrere VMware- und Proxmox-Quellen pro Profil, parallel ausgelesen; Verbindungstest direkt im Dialog
 - QEMU/KVM-VMs und optional LXC-Container; IP-Adressen über VMware Tools bzw. QEMU Guest Agent
 - Tabelle mit Suche, Filtern (Quelle, Status, „neu“/„bereits in NetBox“) und Mehrfachauswahl
-- Import-Assistent in vier Schritten: **Ziel** (Cluster, Mandant aus dem Cluster vorausgewählt, VRF oder global)
+- Automatische Cluster-Zuordnung: Jeder vCenter-/ESXi- bzw. Proxmox-Cluster wird dem gleichnamigen (oder eindeutig
+  ähnlichen) NetBox-Cluster zugeordnet; manuelle Zuordnungen merkt sich das Kundenprofil, fehlende Cluster können
+  direkt in NetBox angelegt werden
+- Import-Assistent in vier Schritten: **Ziel** (Cluster-Zuordnung, Mandant aus dem Cluster vorausgewählt, VRF oder global)
   → **Netzwerke** (fehlende Präfixe mit Größe und VRF prüfen, neue VRFs direkt anlegen)
   → **Prüfen** (Zusammenfassung aller Änderungen) → **Import** (Fortschritt, Live-Protokoll, Abbrechen)
 - VMs werden pro Cluster eindeutig zugeordnet; vorhandene Präfixe werden wiederverwendet

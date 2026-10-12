@@ -110,6 +110,8 @@ def empty_profile(name):
         "netbox_ignore_ssl": False,
         "sources": [],
         "switches": [],
+        # Remembered assignment "<source id>:<hypervisor cluster>" -> NetBox cluster name.
+        "cluster_map": {},
     }
 
 
@@ -154,6 +156,7 @@ class ProfileStore:
                 "netbox_url": record.get("netbox_url", ""),
                 "netbox_token": self._decrypt(record.get("netbox_token_encrypted", ""), f"{name}: NetBox-Token"),
                 "netbox_ignore_ssl": bool(record.get("netbox_ignore_ssl", record.get("ignore_ssl_errors", False))),
+                "cluster_map": dict(record.get("cluster_map", {})),
             })
             for source in record.get("sources", []):
                 profile["sources"].append(self._decrypt_record(source, f"{name}: {source.get('name', 'Quelle')}"))
@@ -214,6 +217,7 @@ class ProfileStore:
                 "netbox_ignore_ssl": bool(profile.get("netbox_ignore_ssl", False)),
                 "sources": [self._encrypt_record(source) for source in profile.get("sources", [])],
                 "switches": [self._encrypt_record(switch) for switch in profile.get("switches", [])],
+                "cluster_map": dict(profile.get("cluster_map", {})),
             })
 
         payload = {

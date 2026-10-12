@@ -73,5 +73,6 @@ class FakeNetBox:
         self.dcim = SimpleNamespace(devices=Endpoint(), interfaces=Endpoint(), cables=Endpoint(),
                                     mac_addresses=Endpoint(), platforms=Endpoint())
         self.ipam = SimpleNamespace(ip_addresses=Endpoint(), prefixes=Endpoint(), vrfs=Endpoint())
-        self.virtualization = SimpleNamespace(clusters=Endpoint(), virtual_machines=Endpoint(), interfaces=Endpoint())
+        self.virtualization = SimpleNamespace(clusters=Endpoint(), cluster_types=Endpoint(), virtual_machines=Endpoint(),
+                                            interfaces=Endpoint())
         self.tenancy = SimpleNamespace(tenants=Endpoint())

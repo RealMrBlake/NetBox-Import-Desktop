@@ -60,6 +60,7 @@ class VMsPage(Page):
             Column("netbox", "NetBox", 95, value=self._netbox_state,
                    color=lambda row: "accent" if self._netbox_state(row) == "Neu" else "text_muted"),
             Column("source", "Quelle", 140),
+            Column("cluster", "Cluster", 140, tooltip=lambda row: f"Hypervisor-Cluster: {row.get('cluster') or '–'}"),
             Column("kind", "Typ", 55),
             Column("status", "Status", 135, value=lambda row: "Eingeschaltet" if row["status"] == "active" else "Aus",
                    dot=lambda row: "success" if row["status"] == "active" else "text_faint"),
@@ -187,11 +188,6 @@ class VMsPage(Page):
     def start_import(self):
         vms = self.model.checked_rows()
         if not vms or self.state.engine is None:
-            return
-        if not self.state.engine.clusters:
-            widgets.message(self.window, "Kein Cluster in NetBox",
-                            "In NetBox ist noch kein Cluster angelegt. Bitte zuerst unter Virtualisierung → Cluster "
-                            "einen Cluster anlegen und die VMs neu laden.", "warning")
             return
         wizard = ImportWizard(self.window, self.state, self.tasks, vms)
         wizard.exec()

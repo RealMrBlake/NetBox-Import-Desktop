@@ -22,13 +22,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from netbox_sync.core.vm_sync import prefix_choices, vrf_label
+from netbox_sync.core.vm_sync import cluster_key, prefix_choices, vrf_label
 from netbox_sync.ui.icons import icon
 from netbox_sync.ui.tasks import log_bus
 from netbox_sync.ui.theme import theme
 from netbox_sync.ui.widgets import Banner, SearchableComboBox, button, checkbox, hline, label, repolish
 
 NEW_VRF = "__new__"
+NEW_CLUSTER = "__new_cluster__"
 GLOBAL_VRF = "__global__"
 STEPS = ("Ziel", "Netzwerke", "Prüfen", "Import")
 
@@ -54,6 +55,7 @@ class ImportWizard(QDialog):
         self.finished_import = False
         self.result_summary = None
         self._vrf_chosen = False
+        self._tenant_chosen = False
         self.target = None
         self.setWindowTitle("VMs nach NetBox importieren")
         self.resize(980, 680)
@@ -114,24 +116,85 @@ class ImportWizard(QDialog):
     # Page 1 – target
     # ------------------------------------------------------------------
 
+    def _cluster_groups(self):
+        groups = {}
+        for vm in self.vms:
+            key = cluster_key(vm)
+            group = groups.setdefault(key, {
+                "key": key, "cluster": vm.get("cluster") or "", "source": vm.get("source", ""),
+                "source_type": vm.get("source_type", ""), "vms": [],
+            })
+            group["vms"].append(vm)
+        return sorted(groups.values(), key=lambda item: (item["source"].casefold(), item["cluster"].casefold()))
+
     def _build_target_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(16)
+        layout.setSpacing(12)
         layout.addWidget(label("Wohin sollen die VMs?", object_name="CardTitle"))
+        layout.addWidget(label(
+            "Für jeden Hypervisor-Cluster wird der passende NetBox-Cluster automatisch gesucht. "
+            "Geänderte Zuordnungen merkt sich das Kundenprofil.", muted=True, wrap=True))
+
+        self.groups = self._cluster_groups()
+        remembered = (self.state.profile or {}).get("cluster_map", {})
+        self.cluster_table = QTableWidget(len(self.groups), 4)
+        self.cluster_table.setHorizontalHeaderLabels(["Hypervisor-Cluster", "VMs", "NetBox-Cluster", "Zuordnung"])
+        self.cluster_table.verticalHeader().setVisible(False)
+        self.cluster_table.verticalHeader().setDefaultSectionSize(46)
+        self.cluster_table.setShowGrid(False)
+        self.cluster_table.setAlternatingRowColors(True)
+        self.cluster_table.setSelectionMode(QTableWidget.NoSelection)
+        self.cluster_table.setFocusPolicy(Qt.NoFocus)
+        header = self.cluster_table.horizontalHeader()
+        header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        self.cluster_table.setColumnWidth(1, 60)
+        self.cluster_table.setColumnWidth(3, 230)
+        self.cluster_table.setFixedHeight(46 * min(len(self.groups), 4) + 40)
+        names = sorted(self.engine.clusters, key=str.casefold)
+        for row, group in enumerate(self.groups):
+            title = group["cluster"] or "(ohne Cluster)"
+            item = QTableWidgetItem(f"{title}  ·  {group['source']}")
+            item.setToolTip("\n".join(sorted(vm["name"] for vm in group["vms"])))
+            self.cluster_table.setItem(row, 0, item)
+            count = QTableWidgetItem(str(len(group["vms"])))
+            count.setTextAlignment(Qt.AlignCenter)
+            self.cluster_table.setItem(row, 1, count)
+            combo = QComboBox()
+            combo.addItem("– bitte wählen –", None)
+            for name in names:
+                combo.addItem(name, name)
+            if group["cluster"] and group["cluster"] not in self.engine.clusters:
+                combo.addItem(f"➕ In NetBox anlegen: „{group['cluster']}“", NEW_CLUSTER)
+            match, how = self.engine.match_cluster(group["cluster"], remembered.get(group["key"]))
+            combo.setCurrentIndex(max(0, combo.findData(match)))
+            group["how"] = how
+            holder = QWidget()
+            holder_layout = QHBoxLayout(holder)
+            holder_layout.setContentsMargins(0, 4, 8, 4)
+            holder_layout.addWidget(combo)
+            self.cluster_table.setCellWidget(row, 2, holder)
+            status = label("")
+            status_holder = QWidget()
+            status_layout = QHBoxLayout(status_holder)
+            status_layout.setContentsMargins(8, 0, 8, 0)
+            status_layout.addWidget(status)
+            self.cluster_table.setCellWidget(row, 3, status_holder)
+            group["combo"] = combo
+            group["status"] = status
+            combo.activated.connect(lambda _index, g=group: (g.update(how="manual"), self._clusters_changed()))
+        layout.addWidget(self.cluster_table)
+
         form = QFormLayout()
         form.setHorizontalSpacing(18)
         form.setVerticalSpacing(8)
         form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-
-        self.cluster = SearchableComboBox("Cluster suchen …")
-        self.cluster.set_items(sorted(self.engine.clusters, key=str.casefold))
-        self.cluster.setMinimumWidth(420)
-        form.addRow("NetBox-Cluster", self.cluster)
-
         self.tenant = SearchableComboBox("Mandant suchen …")
         self.tenant.set_items(sorted(self.engine.tenants, key=str.casefold))
+        self.tenant.setMinimumWidth(420)
         self.tenant_hint = label("", muted=True, wrap=True)
         tenant_box = QVBoxLayout()
         tenant_box.setSpacing(4)
@@ -149,32 +212,57 @@ class ImportWizard(QDialog):
         form.addRow("VRF für IP-Adressen", vrf_box)
         layout.addLayout(form)
 
-        layout.addWidget(Banner(
-            "Der Mandant wird an VMs, IP-Adressen und Präfixen gesetzt. Hat der Cluster in NetBox einen Mandanten, "
-            "ist dieser vorausgewählt.", "info"))
         self.target_error = Banner("", "error")
         self.target_error.hide()
         layout.addWidget(self.target_error)
         layout.addStretch(1)
 
-        self.cluster.currentIndexChanged.connect(self._cluster_changed)
         self.tenant.currentIndexChanged.connect(self._tenant_changed)
+        self.tenant.activated.connect(lambda _index: setattr(self, "_tenant_chosen", True))
         self.vrf.currentIndexChanged.connect(self._vrf_changed)
         self.vrf.activated.connect(lambda _index: setattr(self, "_vrf_chosen", True))
-        self.cluster.lineEdit().editingFinished.connect(self._cluster_changed)
-        self._tenant_changed()
+        self._clusters_changed()
         return page
 
-    def _cluster_changed(self, *_args):
-        cluster = self.cluster.valid_data()
-        if not cluster:
-            return
-        inherited = self.engine.cluster_tenants.get(cluster)
-        if inherited:
-            self.tenant.select_data(inherited["name"])
-            self.tenant_hint.setText(f"Vom Cluster „{cluster}“ übernommen.")
+    @staticmethod
+    def _selected_cluster(group):
+        return group["combo"].currentData()
+
+    def _clusters_changed(self, *_args):
+        texts = {
+            "remembered": ("✔ gemerkte Zuordnung", "success"),
+            "name": ("✔ automatisch (gleicher Name)", "success"),
+            "similar": ("ähnlicher Name – bitte prüfen", "warning"),
+            "manual": ("manuell gewählt", "text_muted"),
+        }
+        tenants = {}
+        for group in self.groups:
+            selected = self._selected_cluster(group)
+            if selected is None:
+                text, token = "kein passender Cluster gefunden", "danger"
+            elif selected == NEW_CLUSTER:
+                text, token = "wird neu angelegt", "accent"
+            else:
+                text, token = texts.get(group.get("how") or "manual", texts["manual"])
+                tenant = self.engine.cluster_tenants.get(selected)
+                if tenant:
+                    tenants.setdefault(tenant["name"], selected)
+            group["status"].setText(text)
+            group["status"].setStyleSheet(f"color: {theme.color(token)};")
+
+        if not self._tenant_chosen and tenants:
+            self.tenant.blockSignals(True)
+            self.tenant.select_data(next(iter(tenants)))
+            self.tenant.blockSignals(False)
+        if len(tenants) > 1:
+            self.tenant_hint.setText(
+                "Die Cluster gehören in NetBox zu verschiedenen Mandanten (" + ", ".join(sorted(tenants))
+                + "). Alle VMs erhalten den hier gewählten Mandanten.")
+        elif tenants:
+            cluster = next(iter(tenants.values()))
+            self.tenant_hint.setText(f"Vom NetBox-Cluster „{cluster}“ übernommen.")
         else:
-            self.tenant_hint.setText(f"Der Cluster „{cluster}“ hat keinen Mandanten – bitte auswählen.")
+            self.tenant_hint.setText("Die Cluster haben in NetBox keinen Mandanten – bitte auswählen.")
         self._tenant_changed()
 
     def _tenant_changed(self, *_args):
@@ -189,26 +277,38 @@ class ImportWizard(QDialog):
         self.vrf.setCurrentIndex(index if index >= 0 else 0)
         self.vrf.blockSignals(False)
         if tenant and not self.new_vrf_name.isModified():
-            cluster = self.cluster.valid_data() or "VMs"
-            self.new_vrf_name.setText(f"{tenant} - {cluster}")
+            first = next((self._selected_cluster(group) for group in self.groups
+                          if self._selected_cluster(group) not in (None, NEW_CLUSTER)), None)
+            self.new_vrf_name.setText(f"{tenant} - {first or 'VMs'}")
         self._vrf_changed()
 
     def _vrf_changed(self, *_args):
         self.new_vrf_name.setVisible(self.vrf.currentData() == NEW_VRF)
 
     def _target(self):
-        cluster = self.cluster.valid_data()
+        missing = [group["cluster"] or "(ohne Cluster)" for group in self.groups
+                   if self._selected_cluster(group) is None]
+        if missing:
+            return None, "Bitte für folgende Hypervisor-Cluster einen NetBox-Cluster wählen: " + ", ".join(missing)
         tenant = self.tenant.valid_data()
         vrf = self.vrf.currentData()
-        if not cluster:
-            return None, "Bitte einen NetBox-Cluster auswählen."
         if not tenant:
             return None, "Bitte einen Mandanten auswählen."
         if vrf == NEW_VRF and not self.new_vrf_name.text().strip():
             return None, "Bitte einen Namen für die neue VRF eingeben."
+        clusters = {}
+        for group in self.groups:
+            selected = self._selected_cluster(group)
+            create = selected == NEW_CLUSTER
+            clusters[group["key"]] = {
+                "name": group["cluster"] if create else selected,
+                "create": create,
+                "source_type": group["source_type"],
+                "label": group["cluster"] or "(ohne Cluster)",
+                "count": len(group["vms"]),
+            }
         return {
-            "cluster": cluster,
-            "cluster_id": self.engine.clusters[cluster],
+            "clusters": clusters,
             "tenant": tenant,
             "tenant_id": self.engine.tenants[tenant],
             "vrf_mode": "new" if vrf == NEW_VRF else ("global" if vrf == GLOBAL_VRF else "existing"),
@@ -401,8 +501,13 @@ class ImportWizard(QDialog):
             target["vrf_mode"], target["vrf_name"])
         new_vrfs = sorted({decision["vrf_name"] for decision in self.plan if decision.get("create_vrf")}
                           - {target["vrf_name"] if target["vrf_mode"] == "new" else None})
+        cluster_lines = [
+            f"{item['label']} → {item['name']}" + (" (wird angelegt)" if item["create"] else "")
+            + f" · {item['count']} VM(s)"
+            for item in target["clusters"].values()
+        ]
         rows = [
-            ("Cluster", target["cluster"]),
+            ("Cluster", "\n".join(cluster_lines)),
             ("Mandant", target["tenant"]),
             ("Standard-VRF", vrf_text),
             ("Virtuelle Maschinen", f"{len(self.vms)} gesamt · {new} werden angelegt · {existing} aktualisiert"),
@@ -422,11 +527,16 @@ class ImportWizard(QDialog):
             self.review_networks.setText(f"Neue Präfixe: {networks}{more}")
         else:
             self.review_networks.setText("Es werden keine neuen Präfixe angelegt.")
-        inherited = self.engine.cluster_tenants.get(target["cluster"], {}).get("name")
-        if inherited and inherited != target["tenant"]:
+        foreign = sorted({
+            f"{item['name']} ({self.engine.cluster_tenants[item['name']]['name']})"
+            for item in target["clusters"].values()
+            if not item["create"] and item["name"] in self.engine.cluster_tenants
+            and self.engine.cluster_tenants[item["name"]]["name"] != target["tenant"]
+        })
+        if foreign:
             self.tenant_warning.set(
-                f"Achtung: Der Cluster gehört in NetBox zum Mandanten <b>{inherited}</b>, "
-                f"importiert wird aber für <b>{target['tenant']}</b>.", "warning")
+                "Achtung: Folgende Cluster gehören in NetBox zu einem anderen Mandanten: <b>" + ", ".join(foreign)
+                + f"</b>. Importiert wird für <b>{target['tenant']}</b>.", "warning")
             self.tenant_warning.show()
         else:
             self.tenant_warning.hide()
@@ -468,11 +578,21 @@ class ImportWizard(QDialog):
         vms = list(self.vms)
         engine = self.engine
         self.running = True
+        if self.state.profile is not None:
+            remembered = self.state.profile.setdefault("cluster_map", {})
+            remembered.update({key: item["name"] for key, item in target["clusters"].items()})
+            self.state.touch()
         log_bus.entry.connect(self._append_log)
         self.run_progress.setRange(0, len(vms))
         self.run_progress.setValue(0)
 
         def work(ctx):
+            cluster_ids = {}
+            for key, item in target["clusters"].items():
+                if item["create"]:
+                    cluster_ids[key] = engine.create_cluster(item["name"], item["source_type"], target["tenant_id"])
+                else:
+                    cluster_ids[key] = engine.clusters[item["name"]]
             vrf_id = target["vrf_id"]
             if target["vrf_mode"] == "new":
                 vrf_id = engine.get_or_create_tenant_vrf(target["vrf_name"], target["tenant_id"])
@@ -487,7 +607,7 @@ class ImportWizard(QDialog):
                     break
                 ctx.progress(index, len(vms), vm["name"])
                 try:
-                    outcome = engine.sync_vm(vm, target["cluster_id"], target["tenant_id"], vrf_id)
+                    outcome = engine.sync_vm(vm, cluster_ids[cluster_key(vm)], target["tenant_id"], vrf_id)
                     results[outcome] += 1
                 except Exception as error:  # noqa: BLE001
                     results["failed"].append(f"{vm['name']}: {error}")

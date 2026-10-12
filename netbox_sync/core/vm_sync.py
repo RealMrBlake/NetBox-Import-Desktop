@@ -1,6 +1,7 @@
 """Import virtual machines, interfaces, IP addresses and prefixes into NetBox."""
 
 import ipaddress
+import re
 
 from netbox_sync.core.netbox import assign_mac, related_id, related_name
 from netbox_sync.core.virtualization import ip_with_prefix, valid_guest_ip
@@ -20,6 +21,21 @@ def vrf_label(vrf):
 def suggested_prefixlen(interface):
     """IPv4 defaults to /24 because guests often report host masks; IPv6 keeps its prefix."""
     return 24 if interface.version == 4 else interface.network.prefixlen
+
+
+def cluster_key(vm):
+    """Identifies the hypervisor cluster of a VM across sources."""
+    return f"{vm.get('source_id', vm.get('source', ''))}:{vm.get('cluster', '')}"
+
+
+def _compact(name):
+    return re.sub(r"[^0-9a-z]", "", (name or "").casefold())
+
+
+CLUSTER_TYPES = {
+    "VMware": ("VMware vSphere", "vmware-vsphere"),
+    "Proxmox": ("Proxmox VE", "proxmox-ve"),
+}
 
 
 def prefix_choices(host_address, detected_prefixlen):
@@ -106,6 +122,48 @@ class VMSyncEngine:
         self.vrfs.append(vrf)
         self.log(f"VRF erstellt: {vrf_name}", "success")
         return vrf.id
+
+    def match_cluster(self, source_cluster, remembered=None):
+        """Find the NetBox cluster for a hypervisor cluster.
+
+        Returns ``(netbox_cluster_name, how)`` where ``how`` is ``remembered``,
+        ``name`` or ``similar``; ``(None, None)`` if nothing matches uniquely.
+        """
+        if remembered and remembered in self.clusters:
+            return remembered, "remembered"
+        if not source_cluster:
+            return None, None
+        wanted = source_cluster.casefold()
+        exact = [name for name in self.clusters if name.casefold() == wanted]
+        if len(exact) == 1:
+            return exact[0], "name"
+        compact = _compact(source_cluster)
+        same = [name for name in self.clusters if _compact(name) == compact]
+        if len(same) == 1:
+            return same[0], "name"
+        if len(compact) >= 3:
+            similar = [name for name in self.clusters
+                       if compact in _compact(name) or (len(_compact(name)) >= 3 and _compact(name) in compact)]
+            if len(similar) == 1:
+                return similar[0], "similar"
+        return None, None
+
+    def create_cluster(self, name, source_type, tenant_id=None):
+        """Create a NetBox cluster (and its cluster type if necessary)."""
+        if name in self.clusters:
+            return self.clusters[name]
+        type_name, slug = CLUSTER_TYPES.get(source_type, (f"{source_type}", _compact(source_type) or "virtualization"))
+        cluster_type = self.nb.virtualization.cluster_types.get(slug=slug)
+        if not cluster_type:
+            cluster_type = self.nb.virtualization.cluster_types.create({"name": type_name, "slug": slug})
+            self.log(f"Cluster-Typ erstellt: {type_name}", "success")
+        payload = {"name": name, "type": cluster_type.id, "status": "active"}
+        if tenant_id:
+            payload["tenant"] = tenant_id
+        cluster = self.nb.virtualization.clusters.create(payload)
+        self.clusters[name] = cluster.id
+        self.log(f"Cluster erstellt: {name}", "success")
+        return cluster.id
 
     def get_platform_id(self, guest_os):
         guest_os = (guest_os or "").lower()

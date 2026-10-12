@@ -69,7 +69,7 @@ def load_vmware_source(source, log=_noop):
                 type=vim.VirtualMachine, all=False, pathSet=[
                     "name", "config.hardware.memoryMB", "config.hardware.numCPU",
                     "config.hardware.device", "config.guestFullName", "config.template",
-                    "runtime.powerState", "guest.net",
+                    "runtime.powerState", "runtime.host", "guest.net",
                 ],
             )
             filter_spec = vim.PropertyCollector.FilterSpec(objectSet=[object_spec], propSet=[property_spec])
@@ -80,16 +80,34 @@ def load_vmware_source(source, log=_noop):
             while result and result.token:
                 result = content.propertyCollector.ContinueRetrievePropertiesEx(result.token)
                 objects.extend(result.objects or [])
+            host_clusters = _vmware_host_clusters(content, vim)
             normalized = []
             for item in objects:
                 properties = {prop.name: prop.val for prop in (item.propSet or [])}
                 if properties.get("name") and not properties.get("config.template"):
-                    normalized.append(_normalize_vmware_vm(properties, source, vim))
+                    vm = _normalize_vmware_vm(properties, source, vim)
+                    host = properties.get("runtime.host")
+                    vm["cluster"] = host_clusters.get(getattr(host, "_moId", None), "")
+                    normalized.append(vm)
             return normalized
         finally:
             view.Destroy()
     finally:
         Disconnect(service_instance)
+
+
+def _vmware_host_clusters(content, vim):
+    """Map ESXi host IDs to their cluster name (or the host name when standalone)."""
+    result = {}
+    view = content.viewManager.CreateContainerView(content.rootFolder, [vim.ComputeResource], True)
+    try:
+        for resource in view.view:
+            name = resource.name
+            for host in resource.host or []:
+                result[host._moId] = name
+    finally:
+        view.Destroy()
+    return result
 
 
 def _normalize_vmware_vm(properties, source, vim):
@@ -176,6 +194,7 @@ def load_proxmox_source(source, log=_noop):
         resources = _proxmox_resources_by_node(session, source)
         log(f"{source['name']}: Node-Abfrage meldet {len(resources)} Ressourcen")
 
+    cluster_name = _proxmox_cluster_name(session, source)
     result = []
     for resource in resources:
         kind = resource.get("type")
@@ -184,7 +203,9 @@ def load_proxmox_source(source, log=_noop):
         if kind == "lxc" and not source.get("include_lxc", True):
             continue
         try:
-            result.append(_normalize_proxmox_guest(session, source, resource))
+            guest = _normalize_proxmox_guest(session, source, resource)
+            guest["cluster"] = cluster_name or resource.get("node", "")
+            result.append(guest)
         except Exception as error:  # noqa: BLE001 - one broken guest must not stop the source
             log(f"{source['name']} / VMID {resource.get('vmid')}: {error}", "warning")
     if not result:
@@ -193,6 +214,15 @@ def load_proxmox_source(source, log=_noop):
             "Dem Benutzer und dem API-Token mindestens PVEAuditor auf /vms zuweisen."
         )
     return result
+
+
+def _proxmox_cluster_name(session, source):
+    """Name of the Proxmox cluster, or ``""`` for a standalone node (the node name is used then)."""
+    try:
+        status = _proxmox_get(session, source["url"], "/cluster/status") or []
+    except (requests.RequestException, PermissionError, ValueError):
+        return ""
+    return next((item.get("name", "") for item in status if item.get("type") == "cluster"), "")
 
 
 def _proxmox_resources_by_node(session, source):

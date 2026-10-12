@@ -104,6 +104,7 @@ class Badge(QLabel):
         super().__init__(text)
         self.setProperty("badge", True)
         self.setAlignment(Qt.AlignCenter)
+        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         self.set(text, kind)
 
     def set(self, text, kind="neutral"):
@@ -229,13 +230,18 @@ class EmptyState(QWidget):
         apply()
         theme.changed.connect(apply)
         layout.addWidget(self.icon_label)
-        self.title_label = label(title, object_name="EmptyTitle")
+        self.title_label = label(title, object_name="EmptyTitle", wrap=True)
         self.title_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.title_label)
         self.text_label = label(text, muted=True, wrap=True)
         self.text_label.setAlignment(Qt.AlignCenter)
         self.text_label.setMaximumWidth(520)
-        layout.addWidget(self.text_label, 0, Qt.AlignHCenter)
+        self.text_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        text_row = QHBoxLayout()
+        text_row.addStretch(1)
+        text_row.addWidget(self.text_label, 10)
+        text_row.addStretch(1)
+        layout.addLayout(text_row)
         buttons = QHBoxLayout()
         buttons.addStretch(1)
         self.action = None

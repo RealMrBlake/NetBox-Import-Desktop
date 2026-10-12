@@ -210,7 +210,7 @@ class MainWindow(QMainWindow):
         bar.setObjectName("StatusBar")
         bar.setFixedHeight(38)
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(16, 0, 10, 0)
+        layout.setContentsMargins(16, 0, 14, 0)
         layout.setSpacing(10)
         self.status_icon = QLabel()
         self.status_icon.setFixedSize(14, 14)
@@ -228,7 +228,7 @@ class MainWindow(QMainWindow):
         self.netbox_pill = Badge("", "neutral")
         self.netbox_pill.setCursor(Qt.PointingHandCursor)
         self.netbox_pill.mousePressEvent = lambda _event: self.navigate("connections")
-        layout.addWidget(self.netbox_pill)
+        layout.addWidget(self.netbox_pill, 0, Qt.AlignVCenter)
         return bar
 
     # ------------------------------------------------------------------

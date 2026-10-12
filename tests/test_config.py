@@ -20,6 +20,7 @@ def test_roundtrip_encrypts_secrets(tmp_path):
                          "token_secret": "geheim", "enabled": True}],
             "switches": [{"id": "w1", "name": "sw1", "device_id": 5, "platform": "auto", "host": "10.0.0.1",
                           "port": 22, "username": "admin", "password": "pw", "enabled": True, "_runtime": "x"}],
+            "cluster_map": {"s1:pve-cluster": "PVE-Prod"},
         }
     }
     settings = dict(DEFAULT_SETTINGS, theme="dark")
@@ -35,6 +36,7 @@ def test_roundtrip_encrypts_secrets(tmp_path):
     assert loaded["Kunde A"]["netbox_token"] == "token-123"
     assert loaded["Kunde A"]["sources"][0]["token_secret"] == "geheim"
     assert loaded["Kunde A"]["switches"][0]["password"] == "pw"
+    assert loaded["Kunde A"]["cluster_map"] == {"s1:pve-cluster": "PVE-Prod"}
 
 
 def test_unreadable_secret_does_not_block_loading(tmp_path):
