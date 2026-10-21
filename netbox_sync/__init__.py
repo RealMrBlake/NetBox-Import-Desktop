@@ -1,7 +1,7 @@
 """NetBox Synchronizer – VMs and switches from the field into NetBox."""
 
 APP_NAME = "NetBox Synchronizer"
-APP_VERSION = "2.0.0"
+APP_VERSION = "4.0.0"
 APP_PUBLISHER = "Louis-Alexander Kerst"
 APP_USER_MODEL_ID = "Louis-AlexanderKerst.NetBoxSynchronizer"
 
