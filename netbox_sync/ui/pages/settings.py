@@ -60,7 +60,7 @@ class SettingsPage(Page):
         self.parallel_wmi.setRange(1, 32)
         self.parallel_wmi.setSuffix(" gleichzeitig")
         self.parallel_wmi.setFixedWidth(160)
-        form.addRow("PowerShell-Sitzungen", self.parallel_wmi)
+        form.addRow("WinRM-Sitzungen", self.parallel_wmi)
         clients.add(form)
         clients.add(label("Kennwörter aus dem Windows-Anmeldefenster werden nie gespeichert, sondern nur bis zum "
                           "Beenden des Programms im Arbeitsspeicher gehalten.", muted=True, wrap=True))

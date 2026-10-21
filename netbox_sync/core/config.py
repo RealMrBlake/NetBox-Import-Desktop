@@ -20,7 +20,7 @@ DEFAULT_SETTINGS = {
     "enable_lldp": False,         # allow configuration changes on switches
     "create_cables": True,
     "offline_mode": False,        # collect and export to JSON without NetBox
-    "parallel_wmi": 8,            # concurrent PowerShell sessions for client scans
+    "parallel_wmi": 8,            # concurrent WinRM sessions for client scans
 }
 
 log = logging.getLogger(__name__)

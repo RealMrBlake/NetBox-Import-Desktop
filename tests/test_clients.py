@@ -181,3 +181,44 @@ def test_profile_keeps_client_options(tmp_path, monkeypatch):
     assert "password" not in loaded["Kunde"]["clients"]
     assert settings["parallel_wmi"] == 8
 
+
+
+INSTANCE = """<p:Win32_NetworkAdapterConfiguration xmlns:p="http://schemas.microsoft.com/wbem/wsman/1/wmi/root/cimv2/Win32_NetworkAdapterConfiguration" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:cim="http://schemas.dmtf.org/wbem/wscim/1/common">
+<p:Description>Intel(R) Ethernet</p:Description><p:DHCPEnabled>true</p:DHCPEnabled>
+<p:IPAddress>192.168.65.43</p:IPAddress><p:IPAddress>fe80::1</p:IPAddress>
+<p:DefaultIPGateway xsi:nil="true"/>
+<p:InstallDate><cim:Datetime>2025-12-23T17:23:16Z</cim:Datetime></p:InstallDate>
+</p:Win32_NetworkAdapterConfiguration>"""
+
+
+def test_parse_wsman_instance():
+    from netbox_sync.core import wsman
+
+    item = wsman.parse_instance(INSTANCE)
+    assert item["Description"] == "Intel(R) Ethernet" and wsman.as_bool(item["DHCPEnabled"])
+    assert item["IPAddress"] == ["192.168.65.43", "fe80::1"]
+    assert item["DefaultIPGateway"] is None and wsman.as_list(item["DefaultIPGateway"]) == []
+    assert item["InstallDate"] == "2025-12-23T17:23:16Z"
+
+
+def test_ad_location_defaults_to_own_domain(monkeypatch):
+    from netbox_sync.core import clients
+
+    monkeypatch.setenv("USERDNSDOMAIN", "FIRMA.LOCAL")
+    assert clients.ad_location({}) == "DC=FIRMA,DC=LOCAL"
+    assert clients.ad_location({"ad_server": "dc01.firma.local"}) == "dc01.firma.local"
+    assert clients.ad_location({"ad_server": "dc01", "ad_base": "OU=PCs,DC=firma,DC=local"}) == \
+        "dc01/OU=PCs,DC=firma,DC=local"
+
+
+def test_scan_runs_in_process(monkeypatch):
+    from netbox_sync.core import clients
+
+    monkeypatch.setattr(clients, "resolves", lambda host: host != "unknown")
+    monkeypatch.setattr(clients, "port_open", lambda host, port: host != "off")
+    rows = [new_row(host) for host in ("pc01.firma.local", "off", "unknown")]
+    seen = []
+    results = clients.scan_clients(rows, query=lambda host: dict(RAW, host=host), on_result=seen.append)
+    status = {row["host"]: row["status"] for row in results}
+    assert status == {"pc01.firma.local": "ok", "off": "offline", "unknown": "offline"}
+    assert len(seen) == 3
