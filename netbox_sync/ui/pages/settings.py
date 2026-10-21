@@ -53,6 +53,19 @@ class SettingsPage(Page):
         switches.add(keys)
         self.body.addWidget(switches)
 
+        clients = Card("Windows-Clients", "Abfrage per WMI/CIM über WinRM.")
+        form = QFormLayout()
+        form.setHorizontalSpacing(18)
+        self.parallel_wmi = QSpinBox()
+        self.parallel_wmi.setRange(1, 32)
+        self.parallel_wmi.setSuffix(" gleichzeitig")
+        self.parallel_wmi.setFixedWidth(160)
+        form.addRow("PowerShell-Sitzungen", self.parallel_wmi)
+        clients.add(form)
+        clients.add(label("Kennwörter aus dem Windows-Anmeldefenster werden nie gespeichert, sondern nur bis zum "
+                          "Beenden des Programms im Arbeitsspeicher gehalten.", muted=True, wrap=True))
+        self.body.addWidget(clients)
+
         data = Card("Daten & Dateien")
         for caption, path, opener in (
             ("Konfiguration", config_path(), config_dir()),
@@ -76,17 +89,19 @@ class SettingsPage(Page):
 
         self.parallel.valueChanged.connect(lambda value: self.state.update_settings(parallel_ssh=value))
         self.enable_lldp.toggled.connect(lambda value: self.state.update_settings(enable_lldp=value))
+        self.parallel_wmi.valueChanged.connect(lambda value: self.state.update_settings(parallel_wmi=value))
         self.state.settings_changed.connect(self.load)
         self.load()
 
     def load(self):
         settings = self.state.settings
-        for widget in (self.parallel, self.enable_lldp, *self.theme_buttons.values()):
+        for widget in (self.parallel, self.parallel_wmi, self.enable_lldp, *self.theme_buttons.values()):
             widget.blockSignals(True)
         self.parallel.setValue(int(settings.get("parallel_ssh", 4)))
+        self.parallel_wmi.setValue(int(settings.get("parallel_wmi", 8)))
         self.enable_lldp.setChecked(bool(settings.get("enable_lldp")))
         self.theme_buttons.get(settings.get("theme", "system"), self.theme_buttons["system"]).setChecked(True)
-        for widget in (self.parallel, self.enable_lldp, *self.theme_buttons.values()):
+        for widget in (self.parallel, self.parallel_wmi, self.enable_lldp, *self.theme_buttons.values()):
             widget.blockSignals(False)
 
     def _set_theme(self, mode):

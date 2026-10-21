@@ -23,6 +23,7 @@ from netbox_sync.ui import widgets
 from netbox_sync.ui.actions import Actions
 from netbox_sync.ui.dialogs import ask_text
 from netbox_sync.ui.icons import icon
+from netbox_sync.ui.pages.clients import ClientsPage
 from netbox_sync.ui.pages.connections import ConnectionsPage
 from netbox_sync.ui.pages.ipam import IpamPage
 from netbox_sync.ui.pages.log import LogPage
@@ -41,6 +42,7 @@ NAVIGATION = (
     ("connections", "Verbindungen", "plug"),
     ("vms", "Virtuelle Maschinen", "server"),
     ("switches", "Switche", "network"),
+    ("clients", "Windows-Clients", "monitor"),
     ("ipam", "VRFs && Netze", "globe"),
     ("log", "Protokoll", "list"),
 )
@@ -100,7 +102,7 @@ class MainWindow(QMainWindow):
         self.toast_widget = Toast(central)
 
         for key, page_class in (("overview", OverviewPage), ("connections", ConnectionsPage), ("vms", VMsPage),
-                                ("switches", SwitchesPage), ("ipam", IpamPage), ("log", LogPage),
+                                ("switches", SwitchesPage), ("clients", ClientsPage), ("ipam", IpamPage), ("log", LogPage),
                                 ("settings", SettingsPage)):
             page = page_class(self)
             self.pages[key] = page
@@ -153,7 +155,7 @@ class MainWindow(QMainWindow):
         titles = QVBoxLayout()
         titles.setSpacing(0)
         titles.addWidget(label("NetBox Synchronizer", object_name="AppTitle"))
-        titles.addWidget(label("VMs & Switche → NetBox", object_name="AppSubtitle"))
+        titles.addWidget(label("VMs, Switche & Clients → NetBox", object_name="AppSubtitle"))
         brand.addLayout(titles, 1)
         layout.addLayout(brand)
         layout.addSpacing(22)
@@ -267,6 +269,8 @@ class MainWindow(QMainWindow):
             page.load()
         elif page is self.pages["switches"] and not self.tasks.busy:
             page.discover()
+        elif page is self.pages["clients"] and not self.tasks.busy:
+            page.scan()
 
     def _focus_search(self):
         search = getattr(self.current_page(), "search", None)
@@ -357,7 +361,7 @@ class MainWindow(QMainWindow):
         has_profile = self.state.profile is not None
         for key in ("duplicate", "rename", "delete"):
             self.profile_actions[key].setEnabled(has_profile)
-        for key in ("connections", "vms", "switches", "ipam"):
+        for key in ("connections", "vms", "switches", "clients", "ipam"):
             self.nav_buttons[key].setEnabled(has_profile)
         self.setWindowTitle(f"{self.state.active} – {APP_NAME}" if has_profile else APP_NAME)
         self._refresh_netbox_pill()

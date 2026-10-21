@@ -15,7 +15,7 @@ LEVELS = {"debug": logging.DEBUG, "info": logging.INFO, "success": SUCCESS,
           "warning": logging.WARNING, "error": logging.ERROR}
 LEVEL_NAMES = {value: key for key, value in LEVELS.items()}
 
-AREAS = {"app": "Allgemein", "netbox": "NetBox", "vm": "VMs", "switch": "Switche", "ipam": "IPAM"}
+AREAS = {"app": "Allgemein", "netbox": "NetBox", "vm": "VMs", "switch": "Switche", "client": "Clients", "ipam": "IPAM"}
 
 
 @dataclass

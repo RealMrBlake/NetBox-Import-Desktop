@@ -18,6 +18,7 @@ class AppState(QObject):
     netbox_changed = Signal()          # connection status / lookup data
     vms_changed = Signal()
     switches_changed = Signal()        # switch list or discovery results
+    clients_changed = Signal()         # Windows client scan results
     save_failed = Signal(str)
 
     def __init__(self, store=None):
@@ -47,6 +48,11 @@ class AppState(QObject):
         self.netbox_devices = None
         self.switch_snapshots = {}
         self.switch_status = {}
+        self.clients = []
+        self.clients_loaded_at = None
+        self.client_engine = None
+        # Logon from the Windows credential prompt; memory only, per profile.
+        self.client_credential = None
 
     def set_netbox(self, nb=None, status="ok", message="", engine=None):
         if nb is not None:
@@ -59,6 +65,7 @@ class AppState(QObject):
         if status == "error":
             self.nb = None
             self.engine = None
+            self.client_engine = None
         self.netbox_changed.emit()
 
     # ------------------------------------------------------------------
@@ -114,6 +121,7 @@ class AppState(QObject):
         self.netbox_changed.emit()
         self.vms_changed.emit()
         self.switches_changed.emit()
+        self.clients_changed.emit()
 
     def create_profile(self, name, copy_from=None):
         profile = copy.deepcopy(self.profiles[copy_from]) if copy_from in self.profiles else empty_profile(name)
@@ -161,6 +169,7 @@ class AppState(QObject):
         if {"netbox_url", "netbox_token", "netbox_ignore_ssl"} & set(changed):
             self.nb = None
             self.engine = None
+            self.client_engine = None
             self.netbox_devices = None
             self.netbox_status = "unknown"
             self.netbox_message = "Verbindungsdaten geändert"
@@ -189,6 +198,17 @@ class AppState(QObject):
     @property
     def switches(self):
         return self.profile["switches"] if self.profile else []
+
+    @property
+    def client_options(self):
+        return self.profile.setdefault("clients", {}) if self.profile else {}
+
+    def update_client_options(self, **values):
+        options = self.client_options
+        if self.profile is None or all(options.get(key) == value for key, value in values.items()):
+            return
+        options.update(values)
+        self.schedule_save()
 
     @property
     def offline(self):

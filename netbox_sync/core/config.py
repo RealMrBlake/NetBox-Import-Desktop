@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from netbox_sync import CONFIG_DIR_NAME
+from netbox_sync.core.clients import DEFAULT_CLIENT_OPTIONS
 
 SECRET_KEYS = ("password", "token_secret")
 CONFIG_VERSION = 5
@@ -19,6 +20,7 @@ DEFAULT_SETTINGS = {
     "enable_lldp": False,         # allow configuration changes on switches
     "create_cables": True,
     "offline_mode": False,        # collect and export to JSON without NetBox
+    "parallel_wmi": 8,            # concurrent PowerShell sessions for client scans
 }
 
 log = logging.getLogger(__name__)
@@ -113,6 +115,8 @@ def empty_profile(name):
         "switches": [],
         # Remembered assignment "<source id>:<hypervisor cluster>" -> NetBox cluster name.
         "cluster_map": {},
+        # Windows client scan: targets and options, never a password.
+        "clients": dict(DEFAULT_CLIENT_OPTIONS),
     }
 
 
@@ -158,6 +162,8 @@ class ProfileStore:
                 "netbox_token": self._decrypt(record.get("netbox_token_encrypted", ""), f"{name}: NetBox-Token"),
                 "netbox_ignore_ssl": bool(record.get("netbox_ignore_ssl", record.get("ignore_ssl_errors", False))),
                 "cluster_map": dict(record.get("cluster_map", {})),
+                "clients": {**DEFAULT_CLIENT_OPTIONS, **{key: value for key, value in record.get("clients", {}).items()
+                                                         if key in DEFAULT_CLIENT_OPTIONS}},
             })
             for source in record.get("sources", []):
                 profile["sources"].append(self._decrypt_record(source, f"{name}: {source.get('name', 'Quelle')}"))
@@ -219,6 +225,7 @@ class ProfileStore:
                 "sources": [self._encrypt_record(source) for source in profile.get("sources", [])],
                 "switches": [self._encrypt_record(switch) for switch in profile.get("switches", [])],
                 "cluster_map": dict(profile.get("cluster_map", {})),
+                "clients": dict(profile.get("clients", DEFAULT_CLIENT_OPTIONS)),
             })
 
         payload = {

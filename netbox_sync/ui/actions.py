@@ -1,5 +1,6 @@
 """Long-running operations started from the UI. Everything here runs in background tasks."""
 
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -8,6 +9,8 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QFileDialog
 
 from netbox_sync.core import exchange, netbox
+from netbox_sync.core.client_sync import ClientSyncEngine
+from netbox_sync.core.clients import ClientScanError, expand_targets, new_row, query_ad, scan_clients
 from netbox_sync.core.config import known_hosts_path
 from netbox_sync.core.netbox import NetBoxError, related_name
 from netbox_sync.core.switches import (
@@ -20,6 +23,7 @@ from netbox_sync.core.switches import (
 from netbox_sync.core.virtualization import load_source
 from netbox_sync.core.vm_sync import VMSyncEngine
 from netbox_sync.ui import widgets
+from netbox_sync.ui.client_dialogs import ClientPreviewDialog, ClientTargetDialog
 from netbox_sync.ui.dialogs import SyncPreviewDialog
 from netbox_sync.ui.tasks import area_log, logger
 
@@ -214,14 +218,15 @@ class Actions:
         safe = "".join(char if char.isalnum() or char in "-_" else "_" for char in profile)
         return f"{safe}-{kind}-{time.strftime('%Y%m%d-%H%M')}{exchange.FILE_SUFFIX}"
 
-    def export_file(self, vms=(), switches=()):
-        """Write VMs and/or ``(switch, snapshot)`` pairs to a JSON exchange file."""
+    def export_file(self, vms=(), switches=(), clients=()):
+        """Write VMs, clients and/or ``(switch, snapshot)`` pairs to a JSON exchange file."""
+        kind = "vms" if vms else ("clients" if clients else "switche")
         path, _filter = QFileDialog.getSaveFileName(
-            self.window, "Für NetBox exportieren", self._default_export_name("vms" if vms else "switche"),
+            self.window, "Für NetBox exportieren", self._default_export_name(kind),
             f"NetBox-Synchronizer-Export (*{exchange.FILE_SUFFIX});;JSON (*.json)")
         if not path:
             return
-        data = exchange.build_export(vms, switches, (self.state.profile or {}).get("name", ""))
+        data = exchange.build_export(vms, switches, (self.state.profile or {}).get("name", ""), clients)
         try:
             exchange.write_export(path, data)
         except OSError as error:
@@ -229,7 +234,8 @@ class Actions:
             return
         parts = [f"{len(data['vms'])} VM(s)"] if data["vms"] else []
         parts += [f"{len(data['switches'])} Switch(e)"] if data["switches"] else []
-        logger("vm" if vms else "switch").log(25, "Exportiert: %s → %s", ", ".join(parts), path)
+        parts += [f"{len(data['clients'])} Client(s)"] if data["clients"] else []
+        logger({"vms": "vm", "clients": "client"}.get(kind, "switch")).log(25, "Exportiert: %s → %s", ", ".join(parts), path)
         self.window.toast(f"{' und '.join(parts)} exportiert")
 
     def _open_export(self):
@@ -263,6 +269,21 @@ class Actions:
         logger("vm").log(25, "%d VM(s) aus Datei geladen%s", len(self.state.vms), origin)
         self.window.toast(f"{len(self.state.vms)} VM(s) aus Datei geladen")
         self._after_file_import()
+
+    def import_clients_file(self):
+        data = self._open_export()
+        if data is None:
+            return
+        if not data["clients"]:
+            widgets.message(self.window, "Keine Clients enthalten", "Die Datei enthält keine Windows-Clients.", "info")
+            return
+        self.state.clients = sorted(data["clients"], key=lambda item: item["name"].casefold())
+        self.state.clients_loaded_at = time.time()
+        self.state.clients_changed.emit()
+        logger("client").log(25, "%d Client(s) aus Datei geladen", len(self.state.clients))
+        self.window.toast(f"{len(self.state.clients)} Client(s) aus Datei geladen")
+        if not self.state.offline and self.state.netbox_configured():
+            self.load_client_devices()
 
     def import_switches_file(self):
         if self.state.profile is None:
@@ -446,3 +467,198 @@ class Actions:
                 self.window.toast(f"NetBox aktualisiert: {text}")
 
         self.tasks.run(work, title="Switche synchronisieren", area="switch", on_success=success)
+
+    # ------------------------------------------------------------------
+    # Windows clients
+    # ------------------------------------------------------------------
+
+    def _client_credential(self):
+        if self.state.client_options.get("use_current_user"):
+            return None
+        return self.state.client_credential
+
+    def load_client_devices(self):
+        """Fetch the NetBox device names so the client table can mark new clients."""
+        connect = self._connector()
+
+        def work(ctx):
+            nb = connect(ctx)
+            engine = ClientSyncEngine(nb, area_log("client"))
+            engine.load_existing()
+            return nb, engine
+
+        def success(result):
+            nb, engine = result
+            self.state.set_netbox(nb, "ok", f"Verbunden · NetBox {nb.netbox_version}")
+            self.state.client_engine = engine
+            self.state.clients_changed.emit()
+
+        self.tasks.run(work, title="NetBox-Geräte laden", area="client", on_success=success,
+                       on_error=self._netbox_failed)
+
+    def scan_clients(self, rows=None):
+        """Scan all targets from AD or the host list, or only the given result rows."""
+        options = dict(self.state.client_options)
+        credential = self._client_credential()
+        parallel = max(1, int(self.state.settings.get("parallel_wmi", 8)))
+        mode = options.get("mode", "ad")
+        hosts = []
+        if rows is None and mode == "hosts":
+            try:
+                hosts = expand_targets(options.get("hosts", ""))
+            except ClientScanError as error:
+                widgets.error(self.window, "Ungültige Eingabe", str(error))
+                return
+            if not hosts:
+                widgets.message(self.window, "Keine Ziele", "Bitte Hostnamen, IP-Adressen oder Bereiche eintragen.",
+                                "info")
+                return
+        connect = self._connector() if not self.state.offline and self.state.netbox_configured() else None
+        targets_given = [dict(row) for row in rows] if rows is not None else None
+
+        def work(ctx):
+            nb = engine = None
+            if connect is not None:
+                try:
+                    nb = connect(ctx)
+                    engine = ClientSyncEngine(nb, ctx.log)
+                    engine.load_existing()
+                except Exception as error:  # noqa: BLE001 - the scan itself does not need NetBox
+                    ctx.log(f"NetBox nicht erreichbar, Abgleich übersprungen: {error}", "warning")
+                    nb = engine = None
+            if targets_given is not None:
+                targets = targets_given
+            elif mode == "ad":
+                targets = query_ad(options, credential, ctx.log, lambda: ctx.cancelled)
+            else:
+                targets = [new_row(host) for host in hosts]
+            ctx.check_cancelled()
+            lock = threading.Lock()
+            done = [0]
+
+            def on_result(row):
+                with lock:
+                    done[0] += 1
+                    ctx.progress(done[0], len(targets), row["name"])
+
+            ctx.progress(0, len(targets), "")
+            results = scan_clients(targets, credential, bool(options.get("use_ssl")), parallel, log=ctx.log,
+                                   on_result=on_result, cancelled=lambda: ctx.cancelled)
+            ctx.check_cancelled()
+            by_host = {row["host"]: row for row in results}
+            return nb, engine, [by_host.get(row["host"], row) for row in targets]
+
+        def success(result):
+            nb, engine, scanned = result
+            if nb is not None:
+                self.state.set_netbox(nb, "ok", f"Verbunden · NetBox {nb.netbox_version}")
+                self.state.client_engine = engine
+            rows_now = scanned
+            if targets_given is not None:
+                by_host = {row["host"]: row for row in scanned}
+                rows_now = [by_host.get(row["host"], row) for row in self.state.clients]
+            unique = {}
+            for row in rows_now:
+                current = unique.get(row["id"])
+                if current is None or (current["status"] != "ok" and row["status"] == "ok"):
+                    unique[row["id"]] = row
+            self.state.clients = sorted(unique.values(), key=lambda item: item["name"].casefold())
+            self.state.clients_loaded_at = time.time()
+            self.state.clients_changed.emit()
+            counts = {status: sum(1 for row in scanned if row["status"] == status)
+                      for status in ("ok", "offline", "error")}
+            text = (f"{counts['ok']} Client(s) ausgelesen, {counts['offline']} nicht erreichbar, "
+                    f"{counts['error']} mit Fehler")
+            logger("client").log(25 if counts["ok"] else 30, "%s", text)
+            denied = sum(1 for row in scanned if row["status"] == "error" and "Zugriff verweigert" in row["message"])
+            if denied and not counts["ok"]:
+                widgets.message(self.window, "Zugriff verweigert",
+                                "Kein Client hat die Abfrage erlaubt. Das verwendete Konto braucht lokale "
+                                "Administratorrechte auf den Clients – bitte mit einem Domänen-Admin anmelden.",
+                                "warning")
+            else:
+                self.window.toast(text, "success" if counts["ok"] else "warning")
+
+        def failed(error):
+            widgets.error(self.window, "Abfrage fehlgeschlagen", str(error),
+                          getattr(error, "traceback_text", None) if not isinstance(error, ClientScanError) else None)
+
+        self.tasks.run(work, title="Windows-Clients abfragen", area="client", on_success=success, on_error=failed)
+
+    def sync_clients(self, rows):
+        if not self.require_netbox_config():
+            return
+        rows = [dict(row) for row in rows if row.get("status") == "ok"]
+        if not rows:
+            widgets.message(self.window, "Keine abgefragten Clients",
+                            "Nur erfolgreich abgefragte Clients (Status „OK“) können übertragen werden.", "info")
+            return
+        connect = self._connector()
+
+        def load(ctx):
+            nb = connect(ctx)
+            engine = ClientSyncEngine(nb, area_log("client"))
+            engine.load_targets()
+            return nb, engine
+
+        def loaded(result):
+            nb, engine = result
+            self.state.set_netbox(nb, "ok", f"Verbunden · NetBox {nb.netbox_version}")
+
+            def ask():
+                if not engine.sites:
+                    widgets.message(self.window, "Kein Standort vorhanden",
+                                    "In NetBox ist noch kein Standort (Site) angelegt. Geräte brauchen einen Standort.",
+                                    "warning")
+                    return
+                dialog = ClientTargetDialog(self.window, engine, self.state.client_options, len(rows))
+                if not dialog.exec():
+                    return
+                choice = dialog.result
+                self.state.update_client_options(
+                    netbox_site=choice["site_id"], netbox_role=choice["role_name"], netbox_tenant=choice["tenant_id"],
+                    sync_interfaces=choice["interfaces"], update_existing=choice["update_existing"])
+                self._preview_clients(engine, rows, choice)
+            QTimer.singleShot(0, ask)
+
+        self.tasks.run(load, title="NetBox-Daten laden", area="client", on_success=loaded,
+                       on_error=self._netbox_failed)
+
+    @staticmethod
+    def _run_client_sync(engine, rows, choice, ctx, dry_run, role_id=None):
+        return engine.sync(rows, choice["site_id"], role_id or choice["role_id"], choice["tenant_id"],
+                           choice["interfaces"], choice["update_existing"], dry_run=dry_run,
+                           progress=ctx.progress, cancelled=lambda: ctx.cancelled)
+
+    def _preview_clients(self, engine, rows, choice):
+        def show(report):
+            def ask():
+                new_role = None if choice["role_id"] else choice["role_name"]
+                if ClientPreviewDialog(self.window, report, new_role).exec():
+                    self._apply_clients(engine, rows, choice)
+            QTimer.singleShot(0, ask)
+
+        self.tasks.run(lambda ctx: self._run_client_sync(engine, rows, choice, ctx, True),
+                       title="Änderungen berechnen", area="client", on_success=show, on_error=self._netbox_failed)
+
+    def _apply_clients(self, engine, rows, choice):
+        def work(ctx):
+            role_id = choice["role_id"] or engine.create_role(choice["role_name"])
+            report = self._run_client_sync(engine, rows, choice, ctx, False, role_id)
+            engine.load_existing()
+            return report
+
+        def success(report):
+            self.state.client_engine = engine
+            self.state.clients_changed.emit()
+            text = (f"{report['devices_created']} Geräte angelegt, {report['devices_updated']} aktualisiert, "
+                    f"{report['interfaces_created']} Schnittstellen, {report['ips_created']} IP-Adressen")
+            area_log("client")(f"Client-Übertragung: {text}", "success")
+            if report["errors"]:
+                widgets.message(self.window, "Mit Problemen abgeschlossen", text + ".", "warning",
+                                "\n".join(report["errors"]))
+            else:
+                self.window.toast(f"NetBox aktualisiert: {text}")
+
+        self.tasks.run(work, title="Clients übertragen", area="client", on_success=success,
+                       on_error=self._netbox_failed)

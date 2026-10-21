@@ -1,6 +1,6 @@
 """JSON exchange files for working without a NetBox connection.
 
-VMs and switch discovery results are collected where the hypervisors and
+VMs, Windows clients and switch discovery results are collected where the hypervisors and
 switches are reachable, exported to a file and imported later on a machine
 that can reach NetBox. Credentials are never written to the file.
 """
@@ -24,7 +24,7 @@ class ExchangeError(ValueError):
     """The file is not a valid exchange file."""
 
 
-def build_export(vms=(), switches=(), profile_name=""):
+def build_export(vms=(), switches=(), profile_name="", clients=()):
     """``switches`` is an iterable of ``(switch config, snapshot)`` pairs."""
     return {
         "format": FORMAT,
@@ -33,6 +33,7 @@ def build_export(vms=(), switches=(), profile_name=""):
         "tool_version": APP_VERSION,
         "profile": profile_name,
         "vms": [{key: value for key, value in vm.items() if key not in VM_RUNTIME_FIELDS} for vm in vms],
+        "clients": [dict(client) for client in clients],
         "switches": [
             {"switch": {key: switch[key] for key in SWITCH_FIELDS if key in switch}, "snapshot": snapshot}
             for switch, snapshot in switches
@@ -66,7 +67,8 @@ def validate(data):
                             "Bitte den NetBox Synchronizer aktualisieren.")
     vms = data.get("vms") or []
     switches = data.get("switches") or []
-    if not isinstance(vms, list) or not isinstance(switches, list):
+    clients = data.setdefault("clients", [])
+    if not isinstance(vms, list) or not isinstance(switches, list) or not isinstance(clients, list):
         raise ExchangeError("Die Datei ist beschädigt (Listen erwartet).")
     for vm in vms:
         if not isinstance(vm, dict) or not vm.get("name") or not vm.get("source"):
@@ -76,6 +78,13 @@ def validate(data):
         vm.setdefault("status", "offline")
         for key in ("vcpus", "memory", "disk"):
             vm[key] = int(vm.get(key) or 0)
+    for client in clients:
+        if not isinstance(client, dict) or not client.get("name"):
+            raise ExchangeError("Die Datei enthält einen Client ohne Namen.")
+        client.setdefault("host", client["name"])
+        client["id"] = str(client["name"]).casefold()
+        client.setdefault("status", "ok")
+        client.setdefault("interfaces", [])
     for item in switches:
         switch = item.get("switch") if isinstance(item, dict) else None
         snapshot = item.get("snapshot") if isinstance(item, dict) else None
