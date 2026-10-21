@@ -1,9 +1,9 @@
 ﻿; Inno Setup 6 script for NetBox Synchronizer.
-; Built by build.ps1, which passes the version: ISCC /DAppVersion=4.1.0 NetBoxSynchronizer.iss
+; Built by build.ps1, which passes the version: ISCC /DAppVersion=4.1.1 NetBoxSynchronizer.iss
 
 #define AppName "NetBox Synchronizer"
 #ifndef AppVersion
-  #define AppVersion "4.1.0"
+  #define AppVersion "4.1.1"
 #endif
 #define AppPublisher "Louis-Alexander Kerst"
 #define AppExeName "NetBoxSynchronizer.exe"
