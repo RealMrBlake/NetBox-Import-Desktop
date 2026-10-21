@@ -1,15 +1,17 @@
 ﻿<#
 .SYNOPSIS
-    Baut NetBox Synchronizer: Tests, PyInstaller-Build und Inno-Setup-Installer.
+    Baut NetBox Synchronizer: Tests, PyInstaller-Build, Inno-Setup-Installer und portable EXE.
 
 .EXAMPLE
     .\build.ps1                  # alles
-    .\build.ps1 -SkipInstaller   # nur dist\NetBoxSynchronizer\
+    .\build.ps1 -SkipInstaller   # nur dist\NetBoxSynchronizer\ (und portable EXE)
+    .\build.ps1 -SkipPortable    # ohne dist\portable\NetBox VM Import.exe
     .\build.ps1 -SkipTests
 #>
 param(
     [switch]$SkipTests,
     [switch]$SkipInstaller,
+    [switch]$SkipPortable,
     [string]$InnoSetupCompiler
 )
 
@@ -37,6 +39,13 @@ $version = (Select-String -Path "netbox_sync\__init__.py" -Pattern 'APP_VERSION 
 Write-Host "Baue NetBox Synchronizer $version …" -ForegroundColor Cyan
 & $python -m PyInstaller --noconfirm --clean --log-level WARN NetBoxSynchronizer.spec
 if ($LASTEXITCODE) { throw "PyInstaller fehlgeschlagen." }
+
+if (-not $SkipPortable) {
+    Write-Host "Baue portable EXE …" -ForegroundColor Cyan
+    & $python -m PyInstaller --noconfirm --clean --log-level WARN --distpath dist\portable --workpath build\portable NetBoxSynchronizer.spec -- --portable
+    if ($LASTEXITCODE) { throw "PyInstaller (portabel) fehlgeschlagen." }
+    Write-Host "Fertig: dist\portable\NetBox VM Import.exe" -ForegroundColor Green
+}
 
 if ($SkipInstaller) {
     Write-Host "Fertig: dist\NetBoxSynchronizer\NetBoxSynchronizer.exe" -ForegroundColor Green

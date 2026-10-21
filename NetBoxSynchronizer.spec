@@ -2,9 +2,15 @@
 # Build: python -m PyInstaller --noconfirm --clean NetBoxSynchronizer.spec
 # Produces a one-folder build in dist/NetBoxSynchronizer that the Inno Setup
 # installer (installer/NetBoxSynchronizer.iss) packages.
+#
+# Portable: python -m PyInstaller --noconfirm --clean NetBoxSynchronizer.spec -- --portable
+# Produces a single self-extracting "NetBox VM Import.exe".
 
 import re
+import sys
 from pathlib import Path
+
+PORTABLE = "--portable" in sys.argv
 
 from PyInstaller.utils.win32.versioninfo import (
     FixedFileInfo,
@@ -66,12 +72,7 @@ a.datas = [
 
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    [],
-    exclude_binaries=True,
-    name="NetBoxSynchronizer",
+EXE_OPTIONS = dict(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -86,12 +87,17 @@ exe = EXE(
     version=version_info,
 )
 
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=False,
-    upx_exclude=[],
-    name="NetBoxSynchronizer",
-)
+if PORTABLE:
+    exe = EXE(pyz, a.scripts, a.binaries, a.datas, [], name="NetBox VM Import", upx_exclude=[],
+              runtime_tmpdir=None, **EXE_OPTIONS)
+else:
+    exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="NetBoxSynchronizer", **EXE_OPTIONS)
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=False,
+        upx_exclude=[],
+        name="NetBoxSynchronizer",
+    )

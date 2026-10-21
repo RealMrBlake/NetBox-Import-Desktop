@@ -105,4 +105,5 @@ Voraussetzung für den Installer ist [Inno Setup 6](https://jrsoftware.org/isinf
 .\build.ps1 -SkipInstaller  # nur dist\NetBoxSynchronizer\
 ```
 
-Ergebnis: `dist\installer\NetBoxSynchronizer-Setup-<version>.exe`. Die Version steht in `netbox_sync/__init__.py`.
+Ergebnis: `dist\installer\NetBoxSynchronizer-Setup-<version>.exe` sowie die portable Variante
+`dist\portable\NetBox VM Import.exe` (ohne Installation lauffähig; `-SkipPortable` lässt sie weg). Die Version steht in `netbox_sync/__init__.py`.
