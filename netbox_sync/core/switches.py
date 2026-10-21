@@ -772,11 +772,21 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
     device-type templates and manual corrections in NetBox are preserved.
     """
     report = _new_report()
-    device_id = int(config["device_id"])
-    device = nb.dcim.devices.get(device_id)
-    if not device:
-        report["errors"].append(f"NetBox-Gerät #{device_id} existiert nicht mehr")
-        return report
+    if config.get("device_id"):
+        device_id = int(config["device_id"])
+        device = nb.dcim.devices.get(device_id)
+        if not device:
+            report["errors"].append(f"NetBox-Gerät #{device_id} existiert nicht mehr")
+            return report
+    else:
+        # Switches captured in offline mode are only known by name.
+        matches = list(nb.dcim.devices.filter(name=config["name"]))
+        if len(matches) != 1:
+            report["errors"].append(f"NetBox-Gerät „{config['name']}“ " +
+                                    ("nicht gefunden" if not matches else "ist nicht eindeutig"))
+            return report
+        device = matches[0]
+        device_id = device.id
     tenant_id = related_id(device, "tenant")
     existing = _device_interfaces(nb, device_id)
     records = {}

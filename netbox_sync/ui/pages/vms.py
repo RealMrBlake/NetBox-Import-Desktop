@@ -28,6 +28,9 @@ class VMsPage(Page):
 
     def __init__(self, window):
         super().__init__(window)
+        self.file_button = self.header.add_action(button("Aus Datei laden …", "folder", on_click=self.load_file,
+                                                         tooltip="VMs aus einer im Offline-Modus erstellten "
+                                                                 "Exportdatei (JSON) laden."))
         self.load_button = self.header.add_action(button("VMs laden", "refresh", "primary", on_click=self.load))
 
         self.stack = QStackedWidget()
@@ -105,6 +108,8 @@ class VMsPage(Page):
         self.model.checked_changed.connect(self._update_selection)
         self.state.vms_changed.connect(self.refresh)
         self.state.profile_switched.connect(self.refresh)
+        self.state.settings_changed.connect(self.refresh)
+        self.state.netbox_changed.connect(self.refresh)
         self.refresh()
 
     def _netbox_state(self, vm):
@@ -114,6 +119,11 @@ class VMsPage(Page):
         return "Vorhanden" if vm["name"] in engine.existing_vms else "Neu"
 
     def refresh(self):
+        offline = self.state.offline
+        self.table.setColumnHidden(1, offline)
+        self.netbox_filter.setVisible(not offline)
+        if offline and self.netbox_filter.currentIndex():
+            self.netbox_filter.setCurrentIndex(0)
         vms = self.state.vms
         self.stack.setCurrentIndex(1 if vms else 0)
         current = self.source_filter.currentData()
@@ -128,7 +138,13 @@ class VMsPage(Page):
         self._apply_filters()
         self.load_button.setText("Neu laden" if vms else "VMs laden")
         if not vms:
-            if not self.state.netbox_configured():
+            if offline and not self.state.sources:
+                self.empty.set_text(text="Offline-Modus: Unter „Verbindungen“ eine VMware- oder Proxmox-Quelle "
+                                         "einrichten oder eine Exportdatei laden.")
+            elif offline:
+                self.empty.set_text(text="Offline-Modus: Die Quellen werden ohne NetBox ausgelesen; ausgewählte VMs "
+                                         "lassen sich anschließend als JSON-Datei exportieren.")
+            elif not self.state.netbox_configured():
                 self.empty.set_text(text="Zuerst unter „Verbindungen“ NetBox und mindestens eine Quelle einrichten.")
             elif not self.state.sources:
                 self.empty.set_text(text="Es ist noch keine VMware- oder Proxmox-Quelle hinterlegt.")
@@ -169,24 +185,34 @@ class VMsPage(Page):
         total = len(self.model.rows)
         shown = f"{visible} von {total} angezeigt" if visible != total else f"{total} VMs"
         self.selection_label.setText(f"{shown} · {count} ausgewählt")
-        self.import_button.setText(f"{count} VM(s) importieren …" if count else "Importieren …")
+        verb = "exportieren" if self.state.offline else "importieren"
+        self.import_button.setText(f"{count} VM(s) {verb} …" if count else f"{verb.capitalize()} …")
         self._update_import_button()
 
     def _update_import_button(self):
         count = len(self.model.checked)
-        enabled = count > 0 and not self.tasks.busy and self.state.engine is not None
-        widgets.set_enabled(self.import_button, enabled,
-                            "Bitte zuerst VMs in der Tabelle anhaken." if not count else "Bitte warten …")
+        ready = self.state.offline or self.state.engine is not None
+        enabled = count > 0 and not self.tasks.busy and ready
+        reason = ("Bitte zuerst VMs in der Tabelle anhaken." if not count else
+                  "Bitte warten …" if self.tasks.busy else "Keine Verbindung zu NetBox – „Neu laden“ wählen.")
+        widgets.set_enabled(self.import_button, enabled, reason)
 
     def set_busy(self, busy):
         self.load_button.setEnabled(not busy)
+        self.file_button.setEnabled(not busy)
         self._update_import_button()
 
     def load(self):
         self.actions.load_vms()
 
+    def load_file(self):
+        self.actions.import_vms_file()
+
     def start_import(self):
         vms = self.model.checked_rows()
+        if vms and self.state.offline:
+            self.actions.export_file(vms=vms)
+            return
         if not vms or self.state.engine is None:
             return
         wizard = ImportWizard(self.window, self.state, self.tasks, vms)

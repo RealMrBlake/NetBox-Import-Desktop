@@ -78,6 +78,7 @@ QToolTip { background: $text; color: $surface; border: none; padding: 6px 8px; b
 /* ---------- Sidebar ---------- */
 #Sidebar { background: $sidebar; }
 #Sidebar QLabel { color: $sidebar_text; }
+#Sidebar QCheckBox { color: $sidebar_text; background: transparent; }
 #Sidebar #AppTitle { color: #FFFFFF; font-size: 12pt; font-weight: 600; }
 #Sidebar #AppSubtitle { color: $sidebar_text; font-size: 8.5pt; }
 #Sidebar #SectionLabel { color: #6B7FA0; font-size: 8pt; font-weight: 600; }

@@ -49,6 +49,14 @@ Bestehende Kundenprofile der Vorgängerversion („NetBox VM Import“) werden a
 - Kabel aus LLDP/CDP auch bei FQDN-Systemnamen oder über die Management-IP
 - Die Switch-Konfiguration wird nur verändert, wenn „LLDP bei Bedarf aktivieren“ ausdrücklich eingeschaltet ist
 
+**Offline-Modus (ohne NetBox)**
+- Checkbox „Offline-Modus (ohne NetBox)“ in der Seitenleiste – gilt global, unabhängig vom Kundenprofil
+- VMs und Switche werden ohne NetBox-Verbindung ausgelesen; Switche lassen sich dann manuell per Name anlegen
+- Ausgewählte VMs bzw. ausgelesene Switche werden als JSON-Datei (`*.nbsync.json`) exportiert – ohne Passwörter,
+  Tokens oder Benutzernamen
+- Auf einem Rechner mit NetBox-Zugang lädt „Aus Datei laden …“ (Seiten VMs und Switche) die Datei; danach laufen
+  Import-Assistent bzw. Dry-Run-Vorschau wie gewohnt. Switche werden über NetBox-Geräte-ID oder Namen zugeordnet
+
 **VRFs & Netze**
 - Mehrere VRFs oder Präfixe für einen Mandanten gesammelt anlegen
 

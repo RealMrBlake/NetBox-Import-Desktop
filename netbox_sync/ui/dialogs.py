@@ -274,9 +274,13 @@ class SwitchDialog(_Dialog):
     """Edit one switch access."""
 
     def __init__(self, parent, switch, devices=None):
-        super().__init__(parent, "Switch bearbeiten", "SSH-Zugang zu einem bestehenden NetBox-Gerät.")
-        self.switch = switch
         self.devices = {item["id"]: item for item in devices or []}
+        # Without NetBox (offline mode) a switch is identified by its name only.
+        self.manual = not self.devices and not switch.get("device_id")
+        super().__init__(parent, "Switch bearbeiten" if switch.get("name") else "Switch hinzufügen",
+                         "SSH-Zugang zu einem Switch. Der Name muss dem späteren NetBox-Gerät entsprechen."
+                         if self.manual else "SSH-Zugang zu einem bestehenden NetBox-Gerät.")
+        self.switch = switch
         self.result = None
 
         form = QFormLayout()
@@ -291,7 +295,12 @@ class SwitchDialog(_Dialog):
             form.addRow("NetBox-Gerät", self.device)
         else:
             self.device = None
-            form.addRow("NetBox-Gerät", label(f"<b>{switch.get('name', '')}</b>"))
+            if self.manual:
+                self.name = QLineEdit(switch.get("name", ""))
+                self.name.setPlaceholderText("Gerätename wie in NetBox")
+                form.addRow("Name", self.name)
+            else:
+                form.addRow("NetBox-Gerät", label(f"<b>{switch.get('name', '')}</b>"))
         self.platform = _platform_combo(switch.get("platform", "auto"))
         self.host = QLineEdit(switch.get("host", ""))
         self.port = QSpinBox()
@@ -323,19 +332,20 @@ class SwitchDialog(_Dialog):
         self.error_banner.show()
 
     def accept(self):
-        fields = (self.host, self.username, self.password)
+        fields = (self.host, self.username, self.password) + ((self.name,) if self.manual else ())
         for widget in fields:
             _mark_invalid(widget, not widget.text().strip())
         device_id = self.device.valid_data() if self.device else self.switch.get("device_id")
         if self.device:
             _mark_invalid(self.device, device_id is None)
-        if device_id is None or any(not widget.text().strip() for widget in fields):
+        if (device_id is None and not self.manual) or any(not widget.text().strip() for widget in fields):
             self.show_error("Bitte Gerät und alle Zugangsdaten angeben.")
             return
         result = dict(self.switch)
         result.update({
             "device_id": device_id,
-            "name": self.devices[device_id]["name"] if self.devices else self.switch.get("name", ""),
+            "name": (self.name.text().strip() if self.manual else
+                     self.devices[device_id]["name"] if self.devices else self.switch.get("name", "")),
             "platform": self.platform.currentData(),
             "host": self.host.text().strip(),
             "port": self.port.value(),

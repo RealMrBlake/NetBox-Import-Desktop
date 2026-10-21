@@ -190,6 +190,10 @@ class AppState(QObject):
     def switches(self):
         return self.profile["switches"] if self.profile else []
 
+    @property
+    def offline(self):
+        return bool(self.settings.get("offline_mode"))
+
     def netbox_configured(self):
         profile = self.profile
         return bool(profile and profile.get("netbox_url") and profile.get("netbox_token"))

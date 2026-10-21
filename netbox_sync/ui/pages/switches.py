@@ -1,4 +1,5 @@
 import time
+import uuid
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QMenu, QSplitter, QStackedWidget
@@ -77,6 +78,9 @@ class SwitchesPage(Page):
 
         # Results -------------------------------------------------------------
         result_card = Card("Ergebnisse", "Erkannte Schnittstellen und Nachbarn der ausgelesenen Switche.")
+        self.file_button = result_card.add_action(button("Aus Datei laden …", "folder", on_click=self.load_file,
+                                                         tooltip="Ausleseergebnisse aus einer im Offline-Modus "
+                                                                 "erstellten Exportdatei (JSON) laden."))
         self.raw_button = result_card.add_action(button("SSH-Rohdaten", "terminal", on_click=self.show_raw))
         self.sync_button = result_card.add_action(button("Nach NetBox übertragen …", "upload", "primary",
                                                          on_click=self.sync))
@@ -142,6 +146,7 @@ class SwitchesPage(Page):
         self.state.profile_switched.connect(self.refresh)
         self.state.profile_edited.connect(self.refresh_switches)
         self.state.settings_changed.connect(self._load_settings)
+        self.state.settings_changed.connect(self._update_buttons)
         self._load_settings()
         self.refresh()
 
@@ -234,11 +239,18 @@ class SwitchesPage(Page):
         self.discover_button.setText(f"{len(targets)} auslesen" if targets else "Auslesen")
         widgets.set_enabled(self.sync_button, bool(with_data) and not busy,
                             "Bitte zuerst Switche auslesen." if not with_data else "Bitte warten …")
-        self.sync_button.setText(f"{len(with_data)} nach NetBox übertragen …" if with_data else "Nach NetBox übertragen …")
+        offline = self.state.offline
+        if offline:
+            self.sync_button.setText(f"{len(with_data)} exportieren …" if with_data else "Exportieren …")
+        else:
+            self.sync_button.setText(f"{len(with_data)} nach NetBox übertragen …" if with_data
+                                     else "Nach NetBox übertragen …")
+        self.cables_option.setVisible(not offline)
         widgets.set_enabled(self.raw_button, bool(self.state.switch_snapshots), "Noch nichts ausgelesen.")
         widgets.set_enabled(self.edit_button, len(self._selected()) == 1, "Bitte genau einen Switch markieren.")
         widgets.set_enabled(self.remove_button, bool(targets), "Bitte Switche anhaken oder markieren.")
         self.add_button.setEnabled(not busy)
+        self.file_button.setEnabled(not busy)
 
     def set_busy(self, busy):
         self._update_buttons()
@@ -266,7 +278,16 @@ class SwitchesPage(Page):
                 self.switch_model.set_checked({switch["id"] for switch in dialog.result})
                 self.window.toast(f"{len(dialog.result)} Switch(e) hinzugefügt – jetzt „Auslesen“ wählen")
 
-        if self.state.netbox_devices is not None:
+        if self.state.offline:
+            dialog = SwitchDialog(self.window, {"id": uuid.uuid4().hex, "platform": "auto", "port": 22,
+                                                "enabled": True})
+            if dialog.exec() and dialog.result:
+                self.state.switches.append(dialog.result)
+                self.state.touch()
+                self.refresh_switches()
+                self.switch_model.set_checked({dialog.result["id"]})
+                self.window.toast(f"{dialog.result['name']} hinzugefügt – jetzt „Auslesen“ wählen")
+        elif self.state.netbox_devices is not None:
             open_dialog(self.state.netbox_devices)
         else:
             self.actions.load_devices(open_dialog)
@@ -314,7 +335,16 @@ class SwitchesPage(Page):
             return
         self.actions.discover_switches(targets)
 
+    def load_file(self):
+        self.actions.import_switches_file()
+
     def sync(self):
+        if self.state.offline:
+            pairs = [(switch, self.state.switch_snapshots[switch["id"]]) for switch in self._targets()
+                     if switch["id"] in self.state.switch_snapshots]
+            if pairs:
+                self.actions.export_file(switches=pairs)
+            return
         targets = [switch["id"] for switch in self._targets() if switch["id"] in self.state.switch_snapshots]
         self.actions.sync_switches(targets, self.cables_option.isChecked())
 

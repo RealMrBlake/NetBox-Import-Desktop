@@ -114,6 +114,7 @@ class MainWindow(QMainWindow):
         self.state.profile_switched.connect(self._refresh_profiles)
         self.state.netbox_changed.connect(self._refresh_netbox_pill)
         self.state.profile_edited.connect(self._refresh_netbox_pill)
+        self.state.settings_changed.connect(self._settings_changed)
         self.state.save_failed.connect(lambda text: self.toast(f"Speichern fehlgeschlagen: {text}", "error", 8000))
         theme.changed.connect(self._theme_changed)
 
@@ -124,7 +125,8 @@ class MainWindow(QMainWindow):
 
         self._restore_geometry()
         self.state.load()
-        self.navigate("overview" if self.state.profile is None or not self.state.netbox_configured() else "vms")
+        self.navigate("overview" if self.state.profile is None
+                      or not (self.state.offline or self.state.netbox_configured()) else "vms")
         self._busy_changed(False)
 
     # ------------------------------------------------------------------
@@ -185,7 +187,14 @@ class MainWindow(QMainWindow):
         self.profile_menu_button.setMenu(menu)
         profile_row.addWidget(self.profile_menu_button)
         layout.addLayout(profile_row)
-        layout.addSpacing(20)
+        layout.addSpacing(8)
+        self.offline_check = widgets.checkbox(
+            "Offline-Modus (ohne NetBox)",
+            tooltip="VMs und Switche nur auslesen und als JSON-Datei exportieren. Die Datei lässt sich später auf "
+                    "einem Rechner mit NetBox-Zugang über „Aus Datei laden …“ importieren.")
+        self.offline_check.toggled.connect(lambda value: self.state.update_settings(offline_mode=value))
+        layout.addWidget(self.offline_check)
+        layout.addSpacing(14)
 
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
@@ -290,6 +299,7 @@ class MainWindow(QMainWindow):
         for action in self.profile_actions.values():
             action.setEnabled(not busy)
         self.profile_combo.setEnabled(not busy)
+        self.offline_check.setEnabled(not busy)
 
     def _progress(self, value, maximum, text):
         if maximum:
@@ -304,8 +314,17 @@ class MainWindow(QMainWindow):
         self.cancel_button.setEnabled(False)
         self.task_label.setText("Wird abgebrochen …")
 
+    def _settings_changed(self):
+        self.offline_check.blockSignals(True)
+        self.offline_check.setChecked(self.state.offline)
+        self.offline_check.blockSignals(False)
+        self._refresh_netbox_pill()
+
     def _refresh_netbox_pill(self):
-        if self.state.profile is None or not self.state.netbox_configured():
+        self.netbox_pill.setToolTip("")
+        if self.state.offline:
+            self.netbox_pill.set("Offline-Modus · Export per JSON", "neutral")
+        elif self.state.profile is None or not self.state.netbox_configured():
             self.netbox_pill.set("NetBox: nicht eingerichtet", "warning")
         elif self.state.netbox_status == "ok":
             self.netbox_pill.set(f"NetBox {self.state.netbox_version} · verbunden", "success")

@@ -52,3 +52,14 @@ def test_sync_matches_short_names_and_keeps_existing_types():
     nb.dcim.interfaces.get(1).cable = True
     again = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=True, dry_run=True)
     assert again["changes"] == []
+
+
+def test_offline_switch_is_resolved_by_name():
+    nb, _switch, snapshot = _setup()
+    report = sync_snapshot_to_netbox(nb, {"id": "s", "name": "access-01", "device_id": None}, snapshot,
+                                     create_cables=False, dry_run=True)
+    assert report["errors"] == []
+    assert report["interfaces_unchanged"] == 1
+
+    missing = sync_snapshot_to_netbox(nb, {"id": "s", "name": "unbekannt"}, snapshot, dry_run=True)
+    assert missing["errors"] == ["NetBox-Gerät „unbekannt“ nicht gefunden"]

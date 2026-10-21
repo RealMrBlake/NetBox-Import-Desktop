@@ -18,6 +18,7 @@ DEFAULT_SETTINGS = {
     "parallel_ssh": 4,            # concurrent switch discoveries
     "enable_lldp": False,         # allow configuration changes on switches
     "create_cables": True,
+    "offline_mode": False,        # collect and export to JSON without NetBox
 }
 
 log = logging.getLogger(__name__)

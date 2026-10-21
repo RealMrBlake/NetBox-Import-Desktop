@@ -133,7 +133,7 @@ class OverviewPage(Page):
         self.body.addWidget(self.content, 1)
 
         for signal in (self.state.profile_switched, self.state.profile_edited, self.state.netbox_changed,
-                       self.state.vms_changed, self.state.switches_changed):
+                       self.state.vms_changed, self.state.switches_changed, self.state.settings_changed):
             signal.connect(self.refresh)
         self.refresh()
 
@@ -155,7 +155,10 @@ class OverviewPage(Page):
 
         configured = self.state.netbox_configured()
         status = self.state.netbox_status
-        if not configured:
+        if self.state.offline:
+            self.netbox_tile.set("Offline-Modus", "Daten werden als JSON-Datei exportiert statt nach NetBox "
+                                 "geschrieben.", "Offline", "neutral")
+        elif not configured:
             self.netbox_tile.set("Nicht eingerichtet", "URL und API-Token fehlen.", "Einrichten", "warning")
         elif status == "ok":
             self.netbox_tile.set(f"NetBox {self.state.netbox_version}", profile["netbox_url"], "Verbunden", "success")
@@ -168,7 +171,8 @@ class OverviewPage(Page):
         active = sum(1 for source in sources if source.get("enabled", True))
         if self.state.vms:
             new = sum(1 for vm in self.state.vms if self.state.engine and vm["name"] not in self.state.engine.existing_vms)
-            self.vm_tile.set(f"{len(self.state.vms)} VMs", f"{new} noch nicht in NetBox · geladen {_ago(self.state.vms_loaded_at)}",
+            known = "" if self.state.engine is None else f"{new} noch nicht in NetBox · "
+            self.vm_tile.set(f"{len(self.state.vms)} VMs", f"{known}geladen {_ago(self.state.vms_loaded_at)}",
                              f"{active} Quelle(n)", "info")
         else:
             self.vm_tile.set(f"{len(sources)} Quelle(n)", "VMs noch nicht geladen." if sources else "Noch keine Quelle.",
@@ -181,7 +185,7 @@ class OverviewPage(Page):
         self.switch_tile.set(f"{len(switches)} Switch(e)", detail,
                              f"{errors} Fehler" if errors else "", "error" if errors else "neutral")
 
-        done = [configured and status != "error", bool(sources), bool(self.state.vms), bool(switches)]
+        done = [self.state.offline or (configured and status != "error"), bool(sources), bool(self.state.vms), bool(switches)]
         first_open = next((index for index, value in enumerate(done) if not value), None)
         for index, step in enumerate(self.steps):
             step.set_done(done[index], primary=index == first_open)

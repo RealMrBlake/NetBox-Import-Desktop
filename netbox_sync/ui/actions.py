@@ -1,11 +1,13 @@
 """Long-running operations started from the UI. Everything here runs in background tasks."""
 
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QFileDialog
 
-from netbox_sync.core import netbox
+from netbox_sync.core import exchange, netbox
 from netbox_sync.core.config import known_hosts_path
 from netbox_sync.core.netbox import NetBoxError, related_name
 from netbox_sync.core.switches import (
@@ -144,7 +146,8 @@ class Actions:
     # ------------------------------------------------------------------
 
     def load_vms(self):
-        if not self.require_netbox_config():
+        offline = self.state.offline
+        if not offline and not self.require_netbox_config():
             return
         sources = [dict(source) for source in self.state.sources if source.get("enabled", True)]
         if not sources:
@@ -154,13 +157,15 @@ class Actions:
                 self.window.navigate("connections")
                 self.window.pages["connections"].add_source()
             return
-        connect = self._connector()
+        connect = None if offline else self._connector()
 
         def work(ctx):
-            nb = connect(ctx)
-            engine = VMSyncEngine(nb, log=area_log("vm"))
-            engine.load_targets()
-            ctx.check_cancelled()
+            nb = engine = None
+            if connect is not None:
+                nb = connect(ctx)
+                engine = VMSyncEngine(nb, log=area_log("vm"))
+                engine.load_targets()
+                ctx.check_cancelled()
             vms, failures = [], []
             ctx.progress(0, len(sources), "Lese Quellen …")
             with ThreadPoolExecutor(max_workers=min(4, len(sources))) as pool:
@@ -183,7 +188,8 @@ class Actions:
 
         def success(result):
             nb, engine, vms, failures = result
-            self.state.set_netbox(nb, "ok", f"Verbunden · NetBox {nb.netbox_version}", engine)
+            if nb is not None:
+                self.state.set_netbox(nb, "ok", f"Verbunden · NetBox {nb.netbox_version}", engine)
             self.state.vms = vms
             self.state.vms_loaded_at = time.time()
             self.state.vms_changed.emit()
@@ -198,6 +204,85 @@ class Actions:
                 self.window.toast(f"{len(vms)} System(e) aus {len(sources)} Quelle(n) geladen")
 
         self.tasks.run(work, title="VMs laden", area="vm", on_success=success, on_error=self._netbox_failed)
+
+    # ------------------------------------------------------------------
+    # Offline exchange files
+    # ------------------------------------------------------------------
+
+    def _default_export_name(self, kind):
+        profile = (self.state.profile or {}).get("name", "export")
+        safe = "".join(char if char.isalnum() or char in "-_" else "_" for char in profile)
+        return f"{safe}-{kind}-{time.strftime('%Y%m%d-%H%M')}{exchange.FILE_SUFFIX}"
+
+    def export_file(self, vms=(), switches=()):
+        """Write VMs and/or ``(switch, snapshot)`` pairs to a JSON exchange file."""
+        path, _filter = QFileDialog.getSaveFileName(
+            self.window, "Für NetBox exportieren", self._default_export_name("vms" if vms else "switche"),
+            f"NetBox-Synchronizer-Export (*{exchange.FILE_SUFFIX});;JSON (*.json)")
+        if not path:
+            return
+        data = exchange.build_export(vms, switches, (self.state.profile or {}).get("name", ""))
+        try:
+            exchange.write_export(path, data)
+        except OSError as error:
+            widgets.error(self.window, "Export fehlgeschlagen", str(error))
+            return
+        parts = [f"{len(data['vms'])} VM(s)"] if data["vms"] else []
+        parts += [f"{len(data['switches'])} Switch(e)"] if data["switches"] else []
+        logger("vm" if vms else "switch").log(25, "Exportiert: %s → %s", ", ".join(parts), path)
+        self.window.toast(f"{' und '.join(parts)} exportiert")
+
+    def _open_export(self):
+        path, _filter = QFileDialog.getOpenFileName(
+            self.window, "Exportdatei laden", "",
+            f"NetBox-Synchronizer-Export (*{exchange.FILE_SUFFIX} *.json);;Alle Dateien (*)")
+        if not path:
+            return None
+        try:
+            return exchange.read_export(path)
+        except (OSError, exchange.ExchangeError) as error:
+            widgets.error(self.window, "Datei kann nicht geladen werden", str(error))
+            return None
+
+    def _after_file_import(self):
+        """In online mode connect to NetBox so the loaded data can be imported right away."""
+        if not self.state.offline and self.state.engine is None and self.state.netbox_configured():
+            self.load_targets(on_done=self.state.vms_changed.emit)
+
+    def import_vms_file(self):
+        data = self._open_export()
+        if data is None:
+            return
+        if not data["vms"]:
+            widgets.message(self.window, "Keine VMs enthalten", "Die Datei enthält keine virtuellen Maschinen.", "info")
+            return
+        self.state.vms = sorted(exchange.prepare_vms(data["vms"]), key=lambda item: item["name"].casefold())
+        self.state.vms_loaded_at = time.time()
+        self.state.vms_changed.emit()
+        origin = f" (Profil „{data['profile']}“, {data.get('created', '')[:10]})" if data.get("profile") else ""
+        logger("vm").log(25, "%d VM(s) aus Datei geladen%s", len(self.state.vms), origin)
+        self.window.toast(f"{len(self.state.vms)} VM(s) aus Datei geladen")
+        self._after_file_import()
+
+    def import_switches_file(self):
+        if self.state.profile is None:
+            return
+        data = self._open_export()
+        if data is None:
+            return
+        if not data["switches"]:
+            widgets.message(self.window, "Keine Switche enthalten", "Die Datei enthält keine Switch-Daten.", "info")
+            return
+        snapshots, added = exchange.merge_switches(self.state.switches, data["switches"], lambda: uuid.uuid4().hex)
+        for switch_id, snapshot in snapshots.items():
+            self.state.switch_snapshots[switch_id] = snapshot
+            self.state.switch_status[switch_id] = ("ok", "aus Datei · " + describe_snapshot(snapshot))
+        if added:
+            self.state.touch()
+        self.state.switches_changed.emit()
+        text = f"{len(snapshots)} Switch(e) aus Datei geladen" + (f", {added} neu im Profil" if added else "")
+        logger("switch").log(25, "%s", text)
+        self.window.toast(text)
 
     # ------------------------------------------------------------------
     # Switches
