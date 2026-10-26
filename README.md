@@ -1,109 +1,145 @@
 # NetBox Synchronizer
 
-Windows-Desktopanwendung, die virtuelle Maschinen aus VMware vSphere und Proxmox VE, HPE-/Aruba-Switche
-sowie Windows-Clients in NetBox dokumentiert.
+Windows desktop application that documents virtual machines from VMware
+vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
+
+| | |
+|---|---|
+| **Type** | Desktop application (Python, PySide6) |
+| **Platform** | Windows |
+| **Repository** | <https://git.mrblake.cc/MrBlake/NetBox-VM-Import-Desktop> |
+
+## Features
+
+### General
+
+- Customer profiles with NetBox target, virtualisation sources and switch
+  credentials; switch between them in the sidebar
+- Automatic saving; passwords, tokens and secrets are encrypted with Windows DPAPI
+- All network access runs in the background — the window stays responsive and
+  operations can be cancelled
+- Light and dark theme (optionally following Windows)
+- Log with filter, search and export, plus a rotating log file under
+  `%APPDATA%\NetBox VM Import\logs`
+- Keyboard shortcuts: `Ctrl+1…8` navigation, `F5` reload/read, `Ctrl+F` search
+
+### Virtual machines
+
+- Multiple VMware and Proxmox sources per profile, read in parallel; connection
+  test directly in the dialog
+- QEMU/KVM VMs and optionally LXC containers; IP addresses via VMware Tools or
+  the QEMU guest agent
+- Table with search, filters (source, status, "new"/"already in NetBox") and
+  multi-selection
+- Automatic cluster mapping: each vCenter/ESXi or Proxmox cluster is mapped to
+  the NetBox cluster with the same (or a uniquely similar) name; manual
+  mappings are remembered in the profile, and missing clusters can be created in
+  NetBox directly
+- Four-step import wizard: **Target** (cluster mapping, tenant preselected from
+  the cluster, VRF or global) → **Networks** (check missing prefixes with size
+  and VRF, create new VRFs directly) → **Review** (summary of all changes) →
+  **Import** (progress, live log, cancel)
+- VMs are matched uniquely per cluster; existing prefixes are reused
+- MAC addresses are set correctly on NetBox ≥ 4.2 (separate MAC model)
+
+### Switches (Aruba CX, ArubaOS-Switch/ProCurve, HPE Comware)
+
+- Add several NetBox devices in one step — host taken from the primary IP,
+  platform suggested from model/manufacturer
+- Platform "detect automatically" via SSH
+- Parallel SSH queries; SSH host keys are stored on first contact and verified
+  afterwards
+- Interfaces, interface IP addresses and LLDP/CDP neighbours
+- **Preview before writing**: all changes are computed as a dry run and only
+  sent after confirmation
+- Interface types from device type templates are left untouched; Comware short
+  names (`GE1/0/1`) are mapped to full NetBox names (`GigabitEthernet1/0/1`)
+- Cables from LLDP/CDP, also with FQDN system names or via the management IP
+- The switch configuration is only changed when "Enable LLDP if needed" is
+  explicitly switched on
+
+### Windows clients (agentless via WMI/CIM over WinRM)
+
+- Targets from Active Directory (optional search OU, enabled accounts only,
+  last logon within N days, include/exclude servers) or as a list of host
+  names, IP addresses, networks (`192.0.2.0/24`) and ranges (`192.0.2.10-50`)
+- Sign-in via the Windows credential dialog (domain account with local admin
+  rights, verified against the domain) or with the current Windows session; the
+  password is kept in memory only
+- Reads name, manufacturer, model (for Lenovo the model name instead of the
+  machine type), serial number, form factor, operating system with
+  version/build, logged-on user, CPU/RAM and physical network adapters with MAC
+  and IPs
+- Parallel queries; unreachable clients stay visible with their AD data, errors
+  come with a concrete hint
+- Import as NetBox devices with site, role and tenant; manufacturers, device
+  types and platforms are created when needed, optionally interfaces, MAC and IP
+  addresses — with a preview before writing
+- Built-in **setup guide**: group policy (WinRM, service, firewall),
+  permissions, common errors, check commands and a connection test for single
+  clients
+
+### Offline mode (without NetBox)
+
+- "Offline mode (without NetBox)" checkbox in the sidebar — global, independent
+  of the customer profile
+- VMs and switches are read without a NetBox connection; switches can then be
+  added manually by name
+- Selected VMs, clients or read switches are exported as a JSON file
+  (`*.nbsync.json`) — without passwords, tokens or user names
+- On a machine with NetBox access, "Load from file …" (VMs, switches and
+  Windows clients pages) loads the file; the import wizard or dry-run preview
+  then runs as usual. Switches are matched by NetBox device ID or name
+
+### VRFs & networks
+
+- Create several VRFs or prefixes for one tenant at once
 
 ## Installation
 
-`NetBoxSynchronizer-Setup-<version>.exe` ausführen. Der Installer
+Run `NetBoxSynchronizer-Setup-<version>.exe`. The installer
 
-- installiert standardmäßig **ohne Administratorrechte** für den aktuellen Benutzer
-  (im Assistenten kann „für alle Benutzer“ gewählt werden),
-- legt einen Startmenü-Eintrag und optional eine Desktop-Verknüpfung an,
-- aktualisiert eine vorhandene Installation direkt,
-- fragt bei der Deinstallation, ob Kundenprofile und Protokolle ebenfalls gelöscht werden sollen.
+- installs for the current user **without administrator rights** by default
+  ("for all users" can be selected in the wizard),
+- creates a Start menu entry and optionally a desktop shortcut,
+- updates an existing installation in place,
+- asks on uninstall whether customer profiles and logs should be removed too.
 
-Bestehende Kundenprofile der Vorgängerversion („NetBox VM Import“) werden automatisch übernommen.
+Customer profiles of the predecessor ("NetBox VM Import") are migrated
+automatically.
 
-## Funktionen
-
-**Allgemein**
-- Kundenprofile mit NetBox-Ziel, Virtualisierungsquellen und Switch-Zugängen; Wechsel über die Seitenleiste
-- Automatisches Speichern; Passwörter, Tokens und Secrets mit Windows DPAPI verschlüsselt
-- Alle Netzwerkzugriffe laufen im Hintergrund – das Fenster bleibt bedienbar, Vorgänge lassen sich abbrechen
-- Helles und dunkles Design (folgt auf Wunsch Windows)
-- Protokoll mit Filter, Suche und Export; zusätzlich rotierende Logdatei unter `%APPDATA%\NetBox VM Import\logs`
-- Tastenkürzel: `Strg+1…8` Navigation, `F5` neu laden/auslesen, `Strg+F` Suche
-
-**Virtuelle Maschinen**
-- Mehrere VMware- und Proxmox-Quellen pro Profil, parallel ausgelesen; Verbindungstest direkt im Dialog
-- QEMU/KVM-VMs und optional LXC-Container; IP-Adressen über VMware Tools bzw. QEMU Guest Agent
-- Tabelle mit Suche, Filtern (Quelle, Status, „neu“/„bereits in NetBox“) und Mehrfachauswahl
-- Automatische Cluster-Zuordnung: Jeder vCenter-/ESXi- bzw. Proxmox-Cluster wird dem gleichnamigen (oder eindeutig
-  ähnlichen) NetBox-Cluster zugeordnet; manuelle Zuordnungen merkt sich das Kundenprofil, fehlende Cluster können
-  direkt in NetBox angelegt werden
-- Import-Assistent in vier Schritten: **Ziel** (Cluster-Zuordnung, Mandant aus dem Cluster vorausgewählt, VRF oder global)
-  → **Netzwerke** (fehlende Präfixe mit Größe und VRF prüfen, neue VRFs direkt anlegen)
-  → **Prüfen** (Zusammenfassung aller Änderungen) → **Import** (Fortschritt, Live-Protokoll, Abbrechen)
-- VMs werden pro Cluster eindeutig zugeordnet; vorhandene Präfixe werden wiederverwendet
-- MAC-Adressen werden auch mit NetBox ≥ 4.2 (eigenes MAC-Modell) korrekt gesetzt
-
-**Switche** (Aruba CX, ArubaOS-Switch/ProCurve, HPE Comware)
-- Mehrere NetBox-Geräte in einem Schritt hinzufügen – Host aus der primären IP, Plattform aus Modell/Hersteller vorgeschlagen
-- Plattform „Automatisch erkennen“ per SSH
-- Parallele SSH-Abfragen; SSH-Hostschlüssel werden beim ersten Kontakt gespeichert und danach geprüft
-- Schnittstellen, Interface-IP-Adressen sowie LLDP-/CDP-Nachbarn
-- **Vorschau vor dem Schreiben**: alle Änderungen werden als Dry-Run berechnet und erst nach Bestätigung übertragen
-- Interface-Typen aus Gerätetyp-Vorlagen bleiben unangetastet; Comware-Kurznamen (`GE1/0/1`) werden den
-  vollständigen NetBox-Namen (`GigabitEthernet1/0/1`) zugeordnet
-- Kabel aus LLDP/CDP auch bei FQDN-Systemnamen oder über die Management-IP
-- Die Switch-Konfiguration wird nur verändert, wenn „LLDP bei Bedarf aktivieren“ ausdrücklich eingeschaltet ist
-
-**Windows-Clients** (agentlos per WMI/CIM über WinRM)
-- Ziele aus dem Active Directory (optional Such-OU, nur aktivierte Konten, letzte Anmeldung innerhalb von N Tagen,
-  Server ein-/ausschließen) oder als Liste von Hostnamen, IP-Adressen, Netzen (`10.0.10.0/24`) und Bereichen
-  (`10.0.20.10-50`)
-- Anmeldung über das Windows-Anmeldefenster (Domänenkonto mit lokalen Adminrechten, wird gegen die Domäne geprüft)
-  oder mit der aktuellen Windows-Anmeldung; das Kennwort bleibt nur im Arbeitsspeicher
-- Liest Name, Hersteller, Modell (bei Lenovo der Modellname statt des Maschinentyps), Seriennummer, Bauform,
-  Betriebssystem mit Version/Build, angemeldeten Benutzer, CPU/RAM sowie physische Netzwerkkarten mit MAC und IPs
-- Parallele Abfrage; nicht erreichbare Clients bleiben mit den AD-Daten sichtbar, Fehler mit konkretem Hinweis
-- Übernahme als NetBox-Geräte mit Standort, Rolle und Mandant; Hersteller, Gerätetypen und Plattformen werden bei
-  Bedarf angelegt, optional Schnittstellen, MAC- und IP-Adressen – mit Vorschau vor dem Schreiben
-- **Einrichtungshilfe** im Programm: Gruppenrichtlinie (WinRM, Dienst, Firewall), Berechtigungen, Fehlerbilder,
-  Prüfbefehle und ein Verbindungstest für einzelne Clients
-
-**Offline-Modus (ohne NetBox)**
-- Checkbox „Offline-Modus (ohne NetBox)“ in der Seitenleiste – gilt global, unabhängig vom Kundenprofil
-- VMs und Switche werden ohne NetBox-Verbindung ausgelesen; Switche lassen sich dann manuell per Name anlegen
-- Ausgewählte VMs, Clients bzw. ausgelesene Switche werden als JSON-Datei (`*.nbsync.json`) exportiert – ohne Passwörter,
-  Tokens oder Benutzernamen
-- Auf einem Rechner mit NetBox-Zugang lädt „Aus Datei laden …“ (Seiten VMs, Switche und Windows-Clients) die Datei; danach laufen
-  Import-Assistent bzw. Dry-Run-Vorschau wie gewohnt. Switche werden über NetBox-Geräte-ID oder Namen zugeordnet
-
-**VRFs & Netze**
-- Mehrere VRFs oder Präfixe für einen Mandanten gesammelt anlegen
-
-## Entwicklung
+## Development
 
 ```powershell
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements-dev.txt
-python main.py          # Anwendung starten
-python -m pytest        # Tests
+python main.py          # start the application
+python -m pytest        # tests
 ```
 
-Projektstruktur:
+Project layout:
 
 ```
 netbox_sync/
-  core/      UI-unabhängige Logik: Konfiguration, NetBox, VMware/Proxmox, VM-Import, Switche, Windows-Clients
-  ui/        Qt-Oberfläche (PySide6): Hauptfenster, Seiten, Dialoge, Import-Assistent, Theme
-  resources/ Icons
-installer/   Inno-Setup-Skript
-tests/       pytest (Parser, Konfiguration, Sync gegen eine In-Memory-NetBox)
+  core/      UI-independent logic: configuration, NetBox, VMware/Proxmox, VM import, switches, Windows clients
+  ui/        Qt interface (PySide6): main window, pages, dialogs, import wizard, theme
+  resources/ icons
+installer/   Inno Setup script
+tests/       pytest (parsers, configuration, sync against an in-memory NetBox)
 ```
 
-## Build & Installer
+## Build & installer
 
-Voraussetzung für den Installer ist [Inno Setup 6](https://jrsoftware.org/isinfo.php)
+The installer requires [Inno Setup 6](https://jrsoftware.org/isinfo.php)
 (`winget install JRSoftware.InnoSetup`).
 
 ```powershell
-.\build.ps1                 # Tests, PyInstaller-Build und Installer
-.\build.ps1 -SkipInstaller  # nur dist\NetBoxSynchronizer\
+.\build.ps1                 # tests, PyInstaller build and installer
+.\build.ps1 -SkipInstaller  # only dist\NetBoxSynchronizer\
 ```
 
-Ergebnis: `dist\installer\NetBoxSynchronizer-Setup-<version>.exe` sowie die portable Variante
-`dist\portable\NetBox VM Import.exe` (ohne Installation lauffähig; `-SkipPortable` lässt sie weg). Die Version steht in `netbox_sync/__init__.py`.
+Output: `dist\installer\NetBoxSynchronizer-Setup-<version>.exe` and the
+portable variant `dist\portable\NetBox VM Import.exe` (runs without
+installation; `-SkipPortable` omits it). The version is set in
+`netbox_sync/__init__.py`.
