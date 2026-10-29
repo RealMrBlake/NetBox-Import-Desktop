@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from netbox_sync.core.vm_sync import cluster_key, prefix_choices, vrf_label
+from netbox_sync.core.vm_sync import cluster_key, host_key, prefix_choices, vrf_label
 from netbox_sync.ui.icons import icon
 from netbox_sync.ui.tasks import log_bus
 from netbox_sync.ui.theme import theme
@@ -31,6 +31,7 @@ from netbox_sync.ui.widgets import Banner, SearchableComboBox, button, checkbox,
 NEW_VRF = "__new__"
 NEW_CLUSTER = "__new_cluster__"
 GLOBAL_VRF = "__global__"
+NO_DEVICE = "__no_device__"
 STEPS = ("Ziel", "Netzwerke", "Prüfen", "Import")
 
 
@@ -127,6 +128,53 @@ class ImportWizard(QDialog):
             group["vms"].append(vm)
         return sorted(groups.values(), key=lambda item: (item["source"].casefold(), item["cluster"].casefold()))
 
+    def _host_groups(self):
+        groups = {}
+        for vm in self.vms:
+            if vm.get("host"):
+                key = host_key(vm)
+                groups.setdefault(key, {"key": key, "host": vm["host"], "source": vm.get("source", ""), "vms": []})
+                groups[key]["vms"].append(vm)
+        return sorted(groups.values(), key=lambda item: (item["source"].casefold(), item["host"].casefold()))
+
+    def _build_host_table(self):
+        """Hypervisor host → NetBox device. Names rarely match, so the user always chooses."""
+        self.host_groups = self._host_groups()
+        remembered = (self.state.profile or {}).get("host_map", {})
+        devices = sorted(((self.engine.device_label(device_id), device_id) for device_id in self.engine.devices),
+                         key=lambda item: item[0].casefold())
+        table = QTableWidget(len(self.host_groups), 3)
+        table.setHorizontalHeaderLabels(["Hypervisor-Host", "VMs", "NetBox-Gerät"])
+        table.verticalHeader().setVisible(False)
+        table.verticalHeader().setDefaultSectionSize(46)
+        table.setShowGrid(False)
+        table.setAlternatingRowColors(True)
+        table.setSelectionMode(QTableWidget.NoSelection)
+        table.setFocusPolicy(Qt.NoFocus)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        table.setColumnWidth(1, 60)
+        table.setFixedHeight(46 * min(len(self.host_groups), 4) + 40)
+        for row, group in enumerate(self.host_groups):
+            item = QTableWidgetItem(f"{group['host']}  ·  {group['source']}")
+            item.setToolTip("\n".join(sorted(vm["name"] for vm in group["vms"])))
+            table.setItem(row, 0, item)
+            count = QTableWidgetItem(str(len(group["vms"])))
+            count.setTextAlignment(Qt.AlignCenter)
+            table.setItem(row, 1, count)
+            combo = SearchableComboBox("NetBox-Gerät suchen …")
+            current = remembered.get(group["key"])
+            if current not in self.engine.devices and current != NO_DEVICE:
+                current = None
+            combo.set_items([("– nicht zuordnen –", NO_DEVICE), *devices], current)
+            holder = QWidget()
+            holder_layout = QHBoxLayout(holder)
+            holder_layout.setContentsMargins(0, 4, 8, 4)
+            holder_layout.addWidget(combo)
+            table.setCellWidget(row, 2, holder)
+            group["combo"] = combo
+        return table
+
     def _build_target_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -187,6 +235,11 @@ class ImportWizard(QDialog):
             group["status"] = status
             combo.activated.connect(lambda _index, g=group: (g.update(how="manual"), self._clusters_changed()))
         layout.addWidget(self.cluster_table)
+        host_table = self._build_host_table()
+        if self.host_groups:
+            layout.addWidget(label("Auf welches NetBox-Gerät soll jeder Hypervisor-Host gemappt werden?",
+                                   muted=True, wrap=True))
+            layout.addWidget(host_table)
 
         form = QFormLayout()
         form.setHorizontalSpacing(18)
@@ -290,6 +343,10 @@ class ImportWizard(QDialog):
                    if self._selected_cluster(group) is None]
         if missing:
             return None, "Bitte für folgende Hypervisor-Cluster einen NetBox-Cluster wählen: " + ", ".join(missing)
+        unmapped = [group["host"] for group in self.host_groups if group["combo"].valid_data() is None]
+        if unmapped:
+            return None, ("Bitte für folgende Hypervisor-Hosts ein NetBox-Gerät wählen "
+                          "(oder „nicht zuordnen“): " + ", ".join(unmapped))
         tenant = self.tenant.valid_data()
         vrf = self.vrf.currentData()
         if not tenant:
@@ -307,8 +364,10 @@ class ImportWizard(QDialog):
                 "label": group["cluster"] or "(ohne Cluster)",
                 "count": len(group["vms"]),
             }
+        hosts = {group["key"]: group["combo"].valid_data() for group in self.host_groups}
         return {
             "clusters": clusters,
+            "hosts": hosts,
             "tenant": tenant,
             "tenant_id": self.engine.tenants[tenant],
             "vrf_mode": "new" if vrf == NEW_VRF else ("global" if vrf == GLOBAL_VRF else "existing"),
@@ -508,6 +567,10 @@ class ImportWizard(QDialog):
         ]
         rows = [
             ("Cluster", "\n".join(cluster_lines)),
+            *([("Hosts", "\n".join(
+                f"{group['host']} → " + ("nicht zuordnen" if target["hosts"][group["key"]] == NO_DEVICE
+                                         else self.engine.device_label(target["hosts"][group["key"]]))
+                for group in self.host_groups))] if self.host_groups else []),
             ("Mandant", target["tenant"]),
             ("Standard-VRF", vrf_text),
             ("Virtuelle Maschinen", f"{len(self.vms)} gesamt · {new} werden angelegt · {existing} aktualisiert"),
@@ -581,6 +644,7 @@ class ImportWizard(QDialog):
         if self.state.profile is not None:
             remembered = self.state.profile.setdefault("cluster_map", {})
             remembered.update({key: item["name"] for key, item in target["clusters"].items()})
+            self.state.profile.setdefault("host_map", {}).update(target["hosts"])
             self.state.touch()
         log_bus.entry.connect(self._append_log)
         self.run_progress.setRange(0, len(vms))
@@ -607,7 +671,9 @@ class ImportWizard(QDialog):
                     break
                 ctx.progress(index, len(vms), vm["name"])
                 try:
-                    outcome = engine.sync_vm(vm, cluster_ids[cluster_key(vm)], target["tenant_id"], vrf_id)
+                    device_id = target["hosts"].get(host_key(vm))
+                    outcome = engine.sync_vm(vm, cluster_ids[cluster_key(vm)], target["tenant_id"], vrf_id,
+                                             None if device_id == NO_DEVICE else device_id)
                     results[outcome] += 1
                 except Exception as error:  # noqa: BLE001
                     results["failed"].append(f"{vm['name']}: {error}")

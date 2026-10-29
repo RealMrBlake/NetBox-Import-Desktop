@@ -28,6 +28,11 @@ def cluster_key(vm):
     return f"{vm.get('source_id', vm.get('source', ''))}:{vm.get('cluster', '')}"
 
 
+def host_key(vm):
+    """Identifies the hypervisor host (ESXi host / Proxmox node) of a VM across sources."""
+    return f"{vm.get('source', '')}:{vm.get('host', '')}"
+
+
 def _compact(name):
     return re.sub(r"[^0-9a-z]", "", (name or "").casefold())
 
@@ -60,6 +65,7 @@ class VMSyncEngine:
         self.tenants = {}
         self.vrfs = []
         self.platforms = []
+        self.devices = {}
         self.existing_vms = {}
         self._reset_run_state()
 
@@ -86,12 +92,19 @@ class VMSyncEngine:
             if tenant_id and tenant_name:
                 self.cluster_tenants[cluster.name] = {"id": tenant_id, "name": tenant_name}
                 self.tenants.setdefault(tenant_name, tenant_id)
+        self.devices = {}
+        for device in self.nb.dcim.devices.all():
+            if device.name:
+                self.devices[device.id] = {
+                    "name": device.name, "site": related_name(device, "site") or "",
+                    "cluster_id": related_id(device, "cluster"),
+                }
         self.existing_vms = {}
         for vm in self.nb.virtualization.virtual_machines.filter(brief=True):
             self.existing_vms.setdefault(vm.name, []).append(vm.id)
         self.log(
             f"NetBox: {len(self.clusters)} Cluster, {len(self.tenants)} Mandanten, "
-            f"{len(self.vrfs)} VRFs, {sum(map(len, self.existing_vms.values()))} VMs"
+            f"{len(self.vrfs)} VRFs, {len(self.devices)} Geräte, {sum(map(len, self.existing_vms.values()))} VMs"
         )
 
     def tenant_vrfs(self, tenant_id):
@@ -301,7 +314,28 @@ class VMSyncEngine:
             raise RuntimeError(f"IP-Adresse {host_address} ist in dieser VRF mehrfach vorhanden")
         return candidates[0] if candidates else None
 
-    def sync_vm(self, source_vm, cluster_id, tenant_id, vrf_id):
+    def device_label(self, device_id):
+        device = self.devices[device_id]
+        return f"{device['name']} ({device['site']})" if device["site"] else device["name"]
+
+    def prepare_host_device(self, device_id, cluster_id):
+        """Make sure the device may host VMs of the cluster; NetBox requires both to match.
+
+        A device without cluster is added to it. Returns ``False`` if it belongs to another cluster.
+        """
+        device = self.devices[device_id]
+        if device["cluster_id"] == cluster_id:
+            return True
+        if device["cluster_id"]:
+            self.log(f"Gerät {device['name']} gehört in NetBox zu einem anderen Cluster – "
+                     "wird nicht als Host eingetragen", "warning")
+            return False
+        self.nb.dcim.devices.get(device_id).update({"cluster": cluster_id})
+        device["cluster_id"] = cluster_id
+        self.log(f"Gerät {device['name']} dem Cluster zugeordnet", "success")
+        return True
+
+    def sync_vm(self, source_vm, cluster_id, tenant_id, vrf_id, device_id=None):
         """Create or update one VM. Returns ``"created"`` or ``"updated"``."""
         payload = {
             "name": source_vm["name"], "cluster": cluster_id, "status": source_vm["status"],
@@ -311,6 +345,8 @@ class VMSyncEngine:
         platform_id = self.get_platform_id(source_vm.get("guest_os"))
         if platform_id:
             payload["platform"] = platform_id
+        if device_id and self.prepare_host_device(device_id, cluster_id):
+            payload["device"] = device_id
 
         netbox_vm = self._find_vm(source_vm["name"], cluster_id)
         if netbox_vm:
