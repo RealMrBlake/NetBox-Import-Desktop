@@ -87,7 +87,7 @@ def load_vmware_source(source, log=_noop):
                 if properties.get("name") and not properties.get("config.template"):
                     vm = _normalize_vmware_vm(properties, source, vim)
                     host = properties.get("runtime.host")
-                    vm["cluster"] = host_clusters.get(getattr(host, "_moId", None), "")
+                    vm["cluster"], vm["host"] = host_clusters.get(getattr(host, "_moId", None), ("", ""))
                     normalized.append(vm)
             return normalized
         finally:
@@ -97,14 +97,14 @@ def load_vmware_source(source, log=_noop):
 
 
 def _vmware_host_clusters(content, vim):
-    """Map ESXi host IDs to their cluster name (or the host name when standalone)."""
+    """Map ESXi host IDs to ``(cluster name, host name)``; standalone hosts use their own name as cluster."""
     result = {}
     view = content.viewManager.CreateContainerView(content.rootFolder, [vim.ComputeResource], True)
     try:
         for resource in view.view:
             name = resource.name
             for host in resource.host or []:
-                result[host._moId] = name
+                result[host._moId] = (name, host.name)
     finally:
         view.Destroy()
     return result
@@ -205,6 +205,7 @@ def load_proxmox_source(source, log=_noop):
         try:
             guest = _normalize_proxmox_guest(session, source, resource)
             guest["cluster"] = cluster_name or resource.get("node", "")
+            guest["host"] = resource.get("node", "")
             result.append(guest)
         except Exception as error:  # noqa: BLE001 - one broken guest must not stop the source
             log(f"{source['name']} / VMID {resource.get('vmid')}: {error}", "warning")

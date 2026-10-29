@@ -75,6 +75,7 @@ def validate(data):
             raise ExchangeError("Die Datei enthält eine VM ohne Name oder Quelle.")
         vm.setdefault("interfaces", [])
         vm.setdefault("cluster", "")
+        vm.setdefault("host", "")
         vm.setdefault("status", "offline")
         for key in ("vcpus", "memory", "disk"):
             vm[key] = int(vm.get(key) or 0)
