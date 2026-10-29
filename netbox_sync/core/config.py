@@ -115,6 +115,7 @@ def empty_profile(name):
         "switches": [],
         # Remembered assignment "<source id>:<hypervisor cluster>" -> NetBox cluster name.
         "cluster_map": {},
+        "host_map": {},
         # Windows client scan: targets and options, never a password.
         "clients": dict(DEFAULT_CLIENT_OPTIONS),
     }
@@ -162,6 +163,7 @@ class ProfileStore:
                 "netbox_token": self._decrypt(record.get("netbox_token_encrypted", ""), f"{name}: NetBox-Token"),
                 "netbox_ignore_ssl": bool(record.get("netbox_ignore_ssl", record.get("ignore_ssl_errors", False))),
                 "cluster_map": dict(record.get("cluster_map", {})),
+                "host_map": dict(record.get("host_map", {})),
                 "clients": {**DEFAULT_CLIENT_OPTIONS, **{key: value for key, value in record.get("clients", {}).items()
                                                          if key in DEFAULT_CLIENT_OPTIONS}},
             })
@@ -225,6 +227,7 @@ class ProfileStore:
                 "sources": [self._encrypt_record(source) for source in profile.get("sources", [])],
                 "switches": [self._encrypt_record(switch) for switch in profile.get("switches", [])],
                 "cluster_map": dict(profile.get("cluster_map", {})),
+                "host_map": dict(profile.get("host_map", {})),
                 "clients": dict(profile.get("clients", DEFAULT_CLIENT_OPTIONS)),
             })
 
