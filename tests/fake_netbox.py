@@ -21,6 +21,8 @@ class Record(SimpleNamespace):
 
 
 def _matches(record, key, value):
+    if isinstance(value, list):  # pynetbox sends lists as repeated query parameters (OR)
+        return any(_matches(record, key, item) for item in value)
     if key == "brief":
         return True
     if key.endswith("__ie"):

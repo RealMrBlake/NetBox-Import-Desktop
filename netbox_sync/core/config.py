@@ -124,6 +124,9 @@ def empty_profile(name):
         "vlan_map": {},
         # Switch network decisions: "<network>" -> {"vrf_id", "vrf_name" (new VRF), "create": prefix}.
         "network_map": {},
+        # Sophos AP import: tenant, role, rename option and site choices
+        # ("site_map": Sophos site -> NetBox site ID, "ap_sites": AP key -> NetBox site ID).
+        "access_points": {},
         # Windows client scan: targets and options, never a password.
         "clients": dict(DEFAULT_CLIENT_OPTIONS),
     }
@@ -174,6 +177,7 @@ class ProfileStore:
                 "host_map": dict(record.get("host_map", {})),
                 "vlan_map": dict(record.get("vlan_map", {})),
                 "network_map": dict(record.get("network_map", {})),
+                "access_points": dict(record.get("access_points", {})),
                 "clients": {**DEFAULT_CLIENT_OPTIONS, **{key: value for key, value in record.get("clients", {}).items()
                                                          if key in DEFAULT_CLIENT_OPTIONS}},
             })
@@ -249,6 +253,7 @@ class ProfileStore:
                 "host_map": dict(profile.get("host_map", {})),
                 "vlan_map": dict(profile.get("vlan_map", {})),
                 "network_map": dict(profile.get("network_map", {})),
+                "access_points": dict(profile.get("access_points", {})),
                 "clients": dict(profile.get("clients", DEFAULT_CLIENT_OPTIONS)),
             })
 

@@ -23,6 +23,7 @@ from netbox_sync.ui import widgets
 from netbox_sync.ui.actions import Actions
 from netbox_sync.ui.dialogs import ask_text
 from netbox_sync.ui.icons import icon
+from netbox_sync.ui.pages.access_points import AccessPointsPage
 from netbox_sync.ui.pages.clients import ClientsPage
 from netbox_sync.ui.pages.connections import ConnectionsPage
 from netbox_sync.ui.pages.ipam import IpamPage
@@ -45,6 +46,7 @@ NAVIGATION = (
     ("vms", "Virtuelle Maschinen", "server"),
     ("switches", "Switche", "network"),
     ("clients", "Windows-Clients", "monitor"),
+    ("aps", "Access Points", "wifi"),
     ("ipam", "VRFs && Netze", "globe"),
     ("scanner", "Netzwerk-Scanner", "search"),
     ("log", "Protokoll", "list"),
@@ -106,7 +108,8 @@ class MainWindow(QMainWindow):
         self.toast_widget = Toast(central)
 
         for key, page_class in (("overview", OverviewPage), ("connections", ConnectionsPage), ("vms", VMsPage),
-                                ("switches", SwitchesPage), ("clients", ClientsPage), ("ipam", IpamPage), ("scanner", ScannerPage),
+                                ("switches", SwitchesPage), ("clients", ClientsPage), ("aps", AccessPointsPage),
+                                ("ipam", IpamPage), ("scanner", ScannerPage),
                                 ("log", LogPage),
                                 ("settings", SettingsPage)):
             page = page_class(self)
@@ -125,7 +128,7 @@ class MainWindow(QMainWindow):
         self.state.save_failed.connect(lambda text: self.toast(f"Speichern fehlgeschlagen: {text}", "error", 8000))
         theme.changed.connect(self._theme_changed)
 
-        for index, (key, _title, _icon) in enumerate((*NAVIGATION, ("settings", "", ""))):
+        for index, (key, _title, _icon) in enumerate((*NAVIGATION[:8], ("settings", "", ""))):
             QShortcut(QKeySequence(f"Ctrl+{index + 1}"), self, activated=lambda k=key: self.navigate(k))
         QShortcut(QKeySequence("F5"), self, activated=self._reload_current)
         QShortcut(QKeySequence("Ctrl+F"), self, activated=self._focus_search)
@@ -368,7 +371,7 @@ class MainWindow(QMainWindow):
         has_profile = self.state.profile is not None
         for key in ("duplicate", "rename", "delete"):
             self.profile_actions[key].setEnabled(has_profile)
-        for key in ("connections", "vms", "switches", "clients", "ipam"):
+        for key in ("connections", "vms", "switches", "clients", "aps", "ipam"):
             self.nav_buttons[key].setEnabled(has_profile)
         self.setWindowTitle(f"{self.state.active} – {APP_NAME}" if has_profile else APP_NAME)
         self._refresh_netbox_pill()

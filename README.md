@@ -21,7 +21,7 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
 - Light and dark theme (optionally following Windows)
 - Log with filter, search and export, plus a rotating log file under
   `%APPDATA%\NetBox VM Import\logs`
-- Keyboard shortcuts: `Ctrl+1…9` navigation, `F5` reload/read, `Ctrl+F` search
+- Keyboard shortcuts: `Ctrl+1…8` navigation, `Ctrl+9` settings, `F5` reload/read, `Ctrl+F` search
 - Updates from the Gitea releases: checked on start (can be switched off in the
   settings, or run on demand); after confirmation the installed version runs the
   new setup silently and the portable EXE replaces itself, then the application
@@ -85,6 +85,22 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
 - Cables from LLDP/CDP, also with FQDN system names or via the management IP
 - The switch configuration is only changed when "Enable LLDP if needed" is
   explicitly switched on
+
+### Sophos access points (CSV from Sophos Central)
+
+- Loads the access point export of Sophos Central (comma or semicolon, UTF-8 or
+  Windows encoding) and checks it: missing site, duplicate IP, serial number or
+  MAC address
+- Finds existing APs in NetBox globally by serial number and MAC address and by
+  name within the tenant group; NetBox APs of the tenant group that are missing
+  in the export are listed as "only in NetBox"
+- Sophos sites are mapped to NetBox sites of the tenant group (suggested by
+  name, stored per profile); APs without a Sophos site get a site per AP
+- New APs are created with Sophos device type, role, site, serial number,
+  firmware, interface with MAC and IP address (primary IPv4); existing ones get
+  missing serial numbers and tenants, optionally the Sophos name. Tenant comes
+  from the NetBox site, otherwise the selected tenant; devices of other tenants
+  are never changed. Preview before writing
 
 ### Network scanner (read only)
 
