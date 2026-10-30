@@ -124,3 +124,49 @@ def test_plan_offers_tenant_group_devices_and_manual_neighbor_creates_cable():
     report = sync_snapshot_to_netbox(nb, switch, snapshot)
     cable = nb.dcim.cables.created[0]
     assert cable["a_terminations"][0]["object_id"] == 2 and cable["b_terminations"][0]["object_id"] == 20
+
+
+def test_missing_vlans_prefixes_and_vrfs_are_only_created_when_approved():
+    nb, switch, snapshot = _numbered_setup()
+    nb.ipam.vlans.records.append(Record(nb.ipam.vlans, id=110, vid=10, name="Server", tenant=SimpleNamespace(id=7)))
+    snapshot["interfaces"][2]["vlans"] = {"untagged": [1], "tagged": [10, 20], "tagged_all": False}
+    snapshot["interfaces"][0]["ip_addresses"] = ["10.1.0.1/24"]
+    snapshot["vlan_names"] = {20: "Clients"}
+
+    plan = plan_switch_sync(nb, switch, snapshot)
+    assert [(item["vid"], item["netbox_name"], item["name"]) for item in plan["vlans"]] == [
+        (1, None, "VLAN1"), (10, "Server", "VLAN10"), (20, None, "Clients")]
+    assert plan["networks"] == [{"network": "10.1.0.0/24", "vrf": "", "existing_vrfs": [], "create": True}]
+
+    # Not approved: nothing is created, only the existing VLAN 10 is assigned.
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False, dry_run=True)
+    assert (report["vlans_created"], report["prefixes_created"], report["vrfs_created"]) == (0, 0, 0)
+    sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False)
+    assert nb.ipam.vlans.created == [] and nb.ipam.prefixes.created == []
+    assert nb.dcim.interfaces.get(1).untagged_vlan == 110 and nb.dcim.interfaces.get(1).mode == "access"
+    assert nb.ipam.ip_addresses.created[0]["tenant"] == 7 and nb.ipam.ip_addresses.created[0]["vrf"] is None
+
+    switch.update({"create_vlans": [20], "create_prefixes": ["10.1.0.0/24"],
+                   "network_vrfs": {"10.1.0.0/24": "Kunde-Mgmt"}})
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False)
+    assert report["errors"] == []
+    assert nb.ipam.vrfs.created == [{"name": "Kunde-Mgmt", "tenant": 7}]
+    vrf_id = nb.ipam.vrfs.records[0].id
+    assert nb.ipam.prefixes.created == [{"prefix": "10.1.0.0/24", "status": "active", "tenant": 7, "vrf": vrf_id}]
+    assert nb.ipam.vlans.created == [{"vid": 20, "name": "Clients", "status": "active", "tenant": 7}]
+    port = nb.dcim.interfaces.get(3)
+    assert port.mode == "tagged" and sorted(port.tagged_vlans) == sorted([110, nb.ipam.vlans.records[1].id])
+
+
+def test_switch_without_tenant_is_refused():
+    nb, switch, snapshot = _numbered_setup()
+    nb.dcim.devices.get(1).tenant = None
+    assert "keinen Mandanten" in plan_switch_sync(nb, switch, snapshot)["error"]
+    report = sync_snapshot_to_netbox(nb, switch, snapshot)
+    assert "keinen Mandanten" in report["errors"][0] and nb.dcim.interfaces.updates == []
+
+
+def test_vlan_names_are_parsed():
+    from netbox_sync.core.switches import parse_vlan_names
+    assert parse_vlan_names('vlan 10\n   name "Server"\n   exit\nvlan 20\n name Clients\n#\n') == {
+        10: "Server", 20: "Clients"}

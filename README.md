@@ -62,6 +62,12 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
 - **Mapping review** before the preview: non-obvious port mappings and every
   LLDP/CDP neighbour can be corrected; a neighbour can be assigned manually to
   any device of the switch's tenant group. Choices are stored in the profile
+- Networks and VLANs in the same review: per network the VRF (global, a tenant
+  VRF or a new one) and whether a missing prefix is created; missing VLANs
+  (named from the switch configuration) are only created when ticked. Existing
+  VLANs are assigned to the ports (802.1Q mode, untagged/tagged)
+- Tenant required: a switch without tenant in NetBox is refused; every created
+  IP address, prefix, VRF, VLAN and cable gets the switch's tenant
 - Cables from LLDP/CDP, also with FQDN system names or via the management IP
 - The switch configuration is only changed when "Enable LLDP if needed" is
   explicitly switched on

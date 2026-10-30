@@ -34,7 +34,7 @@ IP_COMMANDS = {
 CONFIG_COMMANDS = {
     "aruba_cx": "show running-config",
     "aruba_aos": "show running-config",
-    "hpe_comware": "display current-configuration interface",
+    "hpe_comware": "display current-configuration",
 }
 
 LLDP_CONTROL = {
@@ -732,6 +732,17 @@ def _parse_comware_vlans(config):
     return result
 
 
+def parse_vlan_names(config):
+    """``{VLAN ID: name}`` from ``vlan <id>`` blocks (same syntax on all platforms)."""
+    names = {}
+    for match, body in _config_blocks(config or "", re.compile(r"^vlan\s+(\d+)\s*$", re.I)):
+        for line in body:
+            name = re.match(r'^name\s+"?(.*?)"?\s*$', line, flags=re.I)
+            if name and name.group(1):
+                names[int(match.group(1))] = name.group(1)
+    return names
+
+
 def parse_vlans(config, platform):
     """VLAN membership per port, keyed by :func:`interface_key`."""
     if not config:
@@ -810,6 +821,7 @@ def build_snapshot(outputs, platform):
         "raw": {**{key: value for key, value in outputs.items() if key != "config"},
                 **({"vlan_config": _vlan_config_excerpt(outputs["config"])} if outputs.get("config") else {})},
         "vlans_read": bool(outputs.get("config")),
+        "vlan_names": parse_vlan_names(outputs.get("config", "")),
         "lldp_disabled": outputs.get("lldp_disabled", False),
         "lldp_enabled_automatically": outputs.get("lldp_enabled_automatically", False),
         "discovered_at": time.time(),
@@ -1028,9 +1040,50 @@ def candidate_devices(nb, device):
     return scope, sorted(rows, key=lambda row: row["name"].casefold())
 
 
+def _require_tenant(device):
+    tenant_id = related_id(device, "tenant")
+    if tenant_id:
+        return tenant_id, None
+    return None, (f"NetBox-Gerät „{device.name}“ hat keinen Mandanten – bitte zuerst in NetBox einen Mandanten "
+                  "zuweisen. Ohne Mandant werden keine Objekte angelegt.")
+
+
+def snapshot_networks(snapshot):
+    """Networks of all interface IP addresses (host routes are left out)."""
+    networks = set()
+    for interface in snapshot["interfaces"]:
+        for address in interface.get("ip_addresses", []):
+            network = ipaddress.ip_interface(address).network
+            if network.prefixlen < network.max_prefixlen:
+                networks.add(network)
+    return [str(network) for network in sorted(networks, key=lambda item: (item.version, item))]
+
+
+def snapshot_vlan_ids(snapshot):
+    vids = set()
+    for interface in snapshot["interfaces"]:
+        vlans = interface.get("vlans") or {}
+        vids.update(vlans.get("untagged", []))
+        vids.update(vlans.get("tagged", []))
+    return sorted(vids)
+
+
+def _tenant_vlans(nb, tenant_id, site_id):
+    """``{VLAN ID: record}`` of the tenant; a VLAN of the switch's site wins."""
+    found = {}
+    for vlan in nb.ipam.vlans.filter(tenant_id=tenant_id):
+        current = found.get(vlan.vid)
+        if current is None or (related_id(vlan, "site") == site_id and related_id(current, "site") != site_id):
+            found[vlan.vid] = vlan
+    return found
+
+
 def plan_switch_sync(nb, config, snapshot):
-    """Proposed interface mapping and neighbor devices for the review dialog."""
+    """Proposals for the review dialog: interface mapping, neighbor devices,
+    networks (VRF and missing prefixes) and missing VLANs."""
     device, error = _resolve_device(nb, config)
+    if not error:
+        tenant_id, error = _require_tenant(device)
     if error:
         return {"error": error}
     records = list(nb.dcim.interfaces.filter(device_id=device.id))
@@ -1053,6 +1106,33 @@ def plan_switch_sync(nb, config, snapshot):
             known.add(remote.id)
         neighbors.append(dict(neighbor, device_id=device_id, method=method))
     devices.sort(key=lambda row: row["name"].casefold())
+
+    tenant_vrfs = {vrf.id: vrf.name for vrf in nb.ipam.vrfs.filter(tenant_id=tenant_id)}
+    vrfs = sorted(tenant_vrfs.values(), key=str.casefold)
+    stored_vrfs = config.get("network_vrfs") or {}
+    create_prefixes = config.get("create_prefixes")
+    networks = []
+    for network in snapshot_networks(snapshot):
+        # Where the prefix already exists: "" = global, otherwise a tenant VRF.
+        existing = set()
+        for prefix in nb.ipam.prefixes.filter(prefix=network):
+            vrf_id = related_id(prefix, "vrf")
+            if vrf_id is None or vrf_id in tenant_vrfs:
+                existing.add(tenant_vrfs.get(vrf_id, ""))
+        existing = sorted(existing)
+        vrf = stored_vrfs[network] if network in stored_vrfs else (existing[0] if existing else "")
+        if vrf and vrf not in vrfs:
+            vrfs.append(vrf)  # chosen earlier as new VRF, not created yet
+        networks.append({"network": network, "vrf": vrf, "existing_vrfs": existing,
+                         "create": create_prefixes is None or network in create_prefixes})
+
+    names = {int(key): value for key, value in (snapshot.get("vlan_names") or {}).items()}
+    present = _tenant_vlans(nb, tenant_id, related_id(device, "site"))
+    create_vlans = config.get("create_vlans")
+    vlans = [{"vid": vid, "name": names.get(vid) or f"VLAN{vid}",
+              "netbox_name": present[vid].name if vid in present else None,
+              "create": create_vlans is None or vid in create_vlans}
+             for vid in snapshot_vlan_ids(snapshot)]
     return {
         "error": None,
         "device": {"id": device.id, "name": device.name},
@@ -1066,6 +1146,10 @@ def plan_switch_sync(nb, config, snapshot):
         "neighbors": neighbors,
         "device_scope": scope,
         "devices": devices,
+        "tenant": getattr(getattr(device, "tenant", None), "name", None) or str(tenant_id),
+        "vrfs": vrfs,
+        "networks": networks,
+        "vlans": vlans,
     }
 
 
@@ -1119,11 +1203,102 @@ class _RemoteLookup:
         return None
 
 
+_NEW = "new"  # placeholder ID of objects a dry run would create
+
+
+def _sync_vrfs(nb, config, snapshot, tenant_id, dry_run, report):
+    """``{network: VRF ID or None}``; VRFs chosen by name are created for the tenant."""
+    by_name = {vrf.name: vrf.id for vrf in nb.ipam.vrfs.filter(tenant_id=tenant_id)}
+    chosen = config.get("network_vrfs") or {}
+    result = {}
+    for network in snapshot_networks(snapshot):
+        name = chosen.get(network) or ""
+        if name and name not in by_name:
+            report["vrfs_created"] += 1
+            report["changes"].append(f"VRF {name} neu")
+            by_name[name] = _NEW if dry_run else nb.ipam.vrfs.create({"name": name, "tenant": tenant_id}).id
+        result[network] = by_name[name] if name else None
+    return result
+
+
+def _sync_prefixes(nb, config, snapshot, tenant_id, vrf_ids, dry_run, report):
+    """Create missing prefixes that were approved; existing ones stay untouched."""
+    approved = set(config.get("create_prefixes") or [])
+    for network in snapshot_networks(snapshot):
+        vrf_id = vrf_ids.get(network)
+        if network not in approved:
+            continue
+        if vrf_id != _NEW and list(nb.ipam.prefixes.filter(prefix=network, vrf_id=vrf_id or "null")):
+            continue
+        try:
+            report["prefixes_created"] += 1
+            vrf_name = (config.get("network_vrfs") or {}).get(network) or "global"
+            report["changes"].append(f"Prefix {network} neu ({vrf_name})")
+            if not dry_run:
+                nb.ipam.prefixes.create({"prefix": network, "status": "active", "tenant": tenant_id, "vrf": vrf_id})
+        except Exception as error:  # noqa: BLE001
+            report["errors"].append(f"Prefix {network}: {error}")
+
+
+def _sync_vlans(nb, config, snapshot, tenant_id, site_id, dry_run, report):
+    """``{VLAN ID: NetBox ID}``; missing VLANs are only created when approved."""
+    present = {vid: vlan.id for vid, vlan in _tenant_vlans(nb, tenant_id, site_id).items()}
+    approved = {int(vid) for vid in config.get("create_vlans") or []}
+    names = {int(key): value for key, value in (snapshot.get("vlan_names") or {}).items()}
+    for vid in snapshot_vlan_ids(snapshot):
+        if vid in present or vid not in approved:
+            continue
+        name = (names.get(vid) or f"VLAN{vid}")[:64]
+        try:
+            report["vlans_created"] += 1
+            report["changes"].append(f"VLAN {vid} „{name}“ neu")
+            payload = {"vid": vid, "name": name, "status": "active", "tenant": tenant_id}
+            if site_id:
+                payload["site"] = site_id
+            present[vid] = _NEW if dry_run else nb.ipam.vlans.create(payload).id
+        except Exception as error:  # noqa: BLE001
+            report["errors"].append(f"VLAN {vid}: {error}")
+    return present
+
+
+def _record_mode(record):
+    mode = getattr(record, "mode", None)
+    return getattr(mode, "value", mode) or ""
+
+
+def _vlan_assignment(interface, vlan_ids, record=None):
+    """802.1Q mode and VLANs of an interface; empty when ``record`` already matches."""
+    vlans = interface.get("vlans")
+    if not vlans or netbox_interface_type(interface) == "virtual":
+        return {}
+    untagged = next((vlan_ids[vid] for vid in vlans.get("untagged", []) if vid in vlan_ids), None)
+    tagged = sorted((vlan_ids[vid] for vid in vlans.get("tagged", []) if vid in vlan_ids), key=str)
+    if untagged is None and not tagged and not vlans.get("tagged_all"):
+        return {}  # none of its VLANs exists in NetBox – leave the port alone
+    if vlans.get("tagged_all"):
+        wanted = {"mode": "tagged-all", "untagged_vlan": untagged, "tagged_vlans": []}
+    elif vlans.get("tagged"):
+        wanted = {"mode": "tagged", "untagged_vlan": untagged, "tagged_vlans": tagged}
+    else:
+        wanted = {"mode": "access", "untagged_vlan": untagged, "tagged_vlans": []}
+    if record is None:
+        return wanted
+    current = {
+        "mode": _record_mode(record),
+        "untagged_vlan": related_id(record, "untagged_vlan"),
+        "tagged_vlans": sorted((getattr(item, "id", item) for item in getattr(record, "tagged_vlans", None) or []),
+                               key=str),
+    }
+    # NetBox validates the VLANs against the mode, so all three are sent together.
+    return {} if current == wanted else wanted
+
+
 def _new_report():
     return {
         "interfaces_created": 0, "interfaces_updated": 0, "interfaces_unchanged": 0,
         "ips_created": 0, "ips_updated": 0, "ips_unchanged": 0,
         "cables_created": 0, "cables_skipped": 0,
+        "vrfs_created": 0, "prefixes_created": 0, "vlans_created": 0,
         "changes": [], "errors": [],
     }
 
@@ -1137,11 +1312,15 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
     """
     report = _new_report()
     device, error = _resolve_device(nb, config)
+    if not error:
+        tenant_id, error = _require_tenant(device)
     if error:
         report["errors"].append(error)
         return report
     device_id = device.id
-    tenant_id = related_id(device, "tenant")
+    vrf_ids = _sync_vrfs(nb, config, snapshot, tenant_id, dry_run, report)
+    _sync_prefixes(nb, config, snapshot, tenant_id, vrf_ids, dry_run, report)
+    vlan_ids = _sync_vlans(nb, config, snapshot, tenant_id, related_id(device, "site"), dry_run, report)
     matches = match_interfaces(snapshot["interfaces"], list(nb.dcim.interfaces.filter(device_id=device_id)),
                                config.get("interface_map"))
     records = {}
@@ -1159,6 +1338,7 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
                 # routed ports and snapshots without configuration.
                 if label and (getattr(record, "label", "") or "") != label:
                     changes["label"] = label
+                changes.update(_vlan_assignment(interface, vlan_ids, record))
                 if changes:
                     report["interfaces_updated"] += 1
                     texts = []
@@ -1166,6 +1346,8 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
                         texts.append("aktivieren" if changes["enabled"] else "deaktivieren")
                     if "label" in changes:
                         texts.append(f"Label „{label}“")
+                    if "mode" in changes:
+                        texts.append(f"VLAN-Modus {changes['mode']}")
                     target = record.name if method == "name" else f"{record.name} ({interface['name']})"
                     report["changes"].append(f"Interface {target}: {', '.join(texts)}")
                     if not dry_run:
@@ -1181,6 +1363,7 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
                 }
                 if label:
                     payload["label"] = label
+                payload.update(_vlan_assignment(interface, vlan_ids))
                 if interface.get("description"):
                     payload["description"] = interface["description"][:200]
                 report["interfaces_created"] += 1
@@ -1201,25 +1384,25 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
         record = records[key]
         for address in interface.get("ip_addresses", []):
             try:
-                host = str(ipaddress.ip_interface(address).ip)
-                candidates = [
-                    item for item in nb.ipam.ip_addresses.filter(address=host)
-                    if related_id(item, "vrf") is None
-                ]
+                parsed = ipaddress.ip_interface(address)
+                vrf_id = vrf_ids.get(str(parsed.network))
+                if vrf_id == _NEW:
+                    candidates = []  # the VRF only exists after the real run
+                else:
+                    candidates = list(nb.ipam.ip_addresses.filter(address=str(parsed.ip), vrf_id=vrf_id or "null"))
                 if len(candidates) > 1:
-                    raise ValueError("mehrere globale IP-Adressen mit diesem Host gefunden")
-                payload = {"address": address, "status": "active", "assigned_object_type": "dcim.interface"}
+                    raise ValueError("mehrere IP-Adressen mit diesem Host in derselben VRF gefunden")
+                payload = {"address": address, "status": "active", "assigned_object_type": "dcim.interface",
+                           "tenant": tenant_id, "vrf": vrf_id}
                 if record:
                     payload["assigned_object_id"] = record.id
-                if tenant_id:
-                    payload["tenant"] = tenant_id
                 if candidates:
                     current = candidates[0]
                     differs = (
                         str(current.address) != address
                         or getattr(current, "assigned_object_type", None) != "dcim.interface"
                         or getattr(current, "assigned_object_id", None) != payload.get("assigned_object_id")
-                        or (tenant_id and related_id(current, "tenant") != tenant_id)
+                        or related_id(current, "tenant") != tenant_id
                     )
                     if differs:
                         report["ips_updated"] += 1
@@ -1271,6 +1454,7 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
                         "a_terminations": [{"object_type": "dcim.interface", "object_id": local.id}],
                         "b_terminations": [{"object_type": "dcim.interface", "object_id": remote.id}],
                         "status": "connected",
+                        "tenant": tenant_id,
                     })
                     remote.cable = True  # avoid a second cable from the reverse direction
             except Exception as error:  # noqa: BLE001

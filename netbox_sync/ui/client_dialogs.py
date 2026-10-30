@@ -36,9 +36,9 @@ class ClientTargetDialog(_Dialog):
             else:
                 self.role.setEditText(remembered)
         form.addRow("Geräterolle *", self.role)
-        self.tenant = SearchableComboBox("Kein Mandant")
-        self.tenant.set_items([("Kein Mandant", None)] + list(engine.tenants), options.get("netbox_tenant"))
-        form.addRow("Mandant", self.tenant)
+        self.tenant = SearchableComboBox("Mandant wählen …")
+        self.tenant.set_items(list(engine.tenants), options.get("netbox_tenant"))
+        form.addRow("Mandant *", self.tenant)
         self.root.addLayout(form)
         self.interfaces = checkbox("Netzwerkkarten, MAC- und IP-Adressen übernehmen",
                                    options.get("sync_interfaces", True),
@@ -60,16 +60,21 @@ class ClientTargetDialog(_Dialog):
         role_text = self.role.currentText().strip()
         role = self.role.valid_data()
         _mark_invalid(self.site, site is None)
+        tenant = self.tenant.valid_data()
         _mark_invalid(self.role, not role_text)
+        _mark_invalid(self.tenant, tenant is None)
         if site is None:
             self.show_error("Bitte einen vorhandenen Standort auswählen.")
             return
         if not role_text:
             self.show_error("Bitte eine Geräterolle auswählen oder einen Namen für eine neue Rolle eingeben.")
             return
+        if tenant is None:
+            self.show_error("Bitte einen Mandanten auswählen – alle Objekte in NetBox brauchen einen Mandanten.")
+            return
         self.result = {
             "site_id": site, "role_id": role, "role_name": role_text,
-            "tenant_id": self.tenant.valid_data(),
+            "tenant_id": tenant,
             "interfaces": self.interfaces.isChecked(), "update_existing": self.update_existing.isChecked(),
         }
         super().accept()

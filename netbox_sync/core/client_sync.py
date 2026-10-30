@@ -231,12 +231,12 @@ class ClientSyncEngine:
                 if not dry_run:
                     device.update(updates)
         if interfaces:
-            changes.extend(self._sync_interfaces(device, client, dry_run, report))
+            changes.extend(self._sync_interfaces(device, client, tenant_id, dry_run, report))
         if not changes:
             report["devices_unchanged"] += 1
         return changes
 
-    def _sync_interfaces(self, device, client, dry_run, report):
+    def _sync_interfaces(self, device, client, tenant_id, dry_run, report):
         changes = []
         existing = {str(item.name).casefold(): item for item in self.nb.dcim.interfaces.filter(device_id=device.id)}
         primary = None
@@ -257,7 +257,7 @@ class ClientSyncEngine:
             if record is not None and mac and not dry_run:
                 assign_mac(self.nb, record, mac, "dcim.interface")
             for address in interface.get("ips", []):
-                ip, change = self._sync_ip(address, record, interface.get("dhcp"), dry_run, report)
+                ip, change = self._sync_ip(address, record, interface.get("dhcp"), tenant_id, dry_run, report)
                 if change:
                     changes.append(change)
                 if ip is not None and primary is None and ":" not in address and interface.get("gateway"):
@@ -266,7 +266,7 @@ class ClientSyncEngine:
             device.update({"primary_ip4": primary.id})
         return changes
 
-    def _sync_ip(self, address, interface, dhcp, dry_run, report):
+    def _sync_ip(self, address, interface, dhcp, tenant_id, dry_run, report):
         matches = [ip for ip in self.nb.ipam.ip_addresses.filter(address=address.split("/")[0])
                    if related_id(ip, "vrf") is None]
         if not matches:
@@ -276,6 +276,7 @@ class ClientSyncEngine:
             ip = self.nb.ipam.ip_addresses.create({
                 "address": address, "status": "dhcp" if dhcp else "active",
                 "assigned_object_type": "dcim.interface", "assigned_object_id": interface.id,
+                **({"tenant": tenant_id} if tenant_id else {}),
             })
             return ip, f"IP-Adresse {address} anlegen"
         ip = matches[0]
