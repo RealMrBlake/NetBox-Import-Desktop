@@ -29,6 +29,14 @@ IP_COMMANDS = {
     "hpe_comware": ("display ip interface brief", "display ipv6 interface brief"),
 }
 
+# The running configuration is the only output that shows untagged and tagged
+# VLAN membership per port on all three platforms.
+CONFIG_COMMANDS = {
+    "aruba_cx": "show running-config",
+    "aruba_aos": "show running-config",
+    "hpe_comware": "display current-configuration interface",
+}
+
 LLDP_CONTROL = {
     "aruba_cx": {
         "status": "show lldp configuration",
@@ -311,6 +319,10 @@ def run_switch_commands(config, enable_lldp=False, known_hosts=None, log=_noop):
                     cdp_ports.append(match.group(1))
             details = [_run_cli_command(channel, f"show cdp neighbor-info {port}", timeout=30) for port in cdp_ports]
             cdp_neighbors = "\n".join([cdp_summary, *details])
+        config_output = _run_cli_command(channel, CONFIG_COMMANDS[platform], timeout=90)
+        if CLI_ERROR.search(config_output[:500]):
+            log(f"{config.get('name', config['host'])}: Konfiguration nicht lesbar – VLANs werden nicht übernommen")
+            config_output = ""
         return {
             "platform": platform,
             "interfaces": interfaces,
@@ -318,6 +330,7 @@ def run_switch_commands(config, enable_lldp=False, known_hosts=None, log=_noop):
             "ipv6_interfaces": ip_outputs[1],
             "neighbors": neighbors,
             "cdp_neighbors": cdp_neighbors,
+            "config": config_output,
             "lldp_status": lldp_status,
             "lldp_disabled": lldp_disabled and not lldp_enabled_automatically,
             "lldp_enabled_automatically": lldp_enabled_automatically,
@@ -591,8 +604,177 @@ def _parse_neighbor_table(output):
     return neighbors
 
 
+# --------------------------------------------------------------------------
+# VLAN membership from the running configuration
+# --------------------------------------------------------------------------
+
+_PORT_RANGE = re.compile(r"^(\D*(?:\d+/)*)(\d+)-(?:\1)?(\d+)$")
+_VLAN_CONFIG_LINE = re.compile(r"(?i)^\s*(?:interface\s|vlan\s|#|exit|\s*(?:no\s+)?routing\b)|vlan|tagged|link-type|link-mode")
+
+
+def parse_vlan_list(text):
+    """``10,20-22`` (Aruba) or ``10 20 to 22`` (Comware) → set of VLAN IDs."""
+    text = re.sub(r"\s+to\s+", "-", text.strip(), flags=re.I)
+    vlans = set()
+    for part in re.split(r"[,\s]+", text):
+        match = re.fullmatch(r"(\d+)(?:-(\d+))?", part)
+        if not match:
+            continue
+        start, end = int(match.group(1)), int(match.group(2) or match.group(1))
+        if 1 <= start <= end <= 4094:
+            vlans.update(range(start, end + 1))
+    return vlans
+
+
+def _expand_ports(text):
+    """ArubaOS-S port lists such as ``1-4,A1-A2,1/5-1/8,Trk1``."""
+    ports = []
+    for part in (item.strip() for item in text.split(",")):
+        match = _PORT_RANGE.match(part)
+        if match and int(match.group(2)) <= int(match.group(3)):
+            ports += [f"{match.group(1)}{number}" for number in range(int(match.group(2)), int(match.group(3)) + 1)]
+        elif part:
+            ports.append(part)
+    return ports
+
+
+def _membership(untagged=(), tagged=(), tagged_all=False):
+    untagged = set(untagged)
+    return {"untagged": sorted(untagged), "tagged": sorted(set(tagged) - untagged), "tagged_all": bool(tagged_all)}
+
+
+def _config_blocks(config, header):
+    """Yield ``(header match, body lines)`` for indented configuration blocks."""
+    current, body = None, []
+    for line in clean_output(config).splitlines():
+        match = header.match(line)
+        if match:
+            if current:
+                yield current, body
+            current, body = match, []
+        elif current and line[:1] in (" ", "\t"):
+            body.append(line.strip())
+        elif current:
+            yield current, body
+            current, body = None, []
+    if current:
+        yield current, body
+
+
+def _parse_aos_vlans(config):
+    ports = {}
+    for match, body in _config_blocks(config, re.compile(r"^vlan\s+(\d+)\s*$", re.I)):
+        vlan = int(match.group(1))
+        for line in body:
+            member = re.match(r"^(untagged|tagged)\s+(\S+)", line, flags=re.I)
+            if member:
+                for port in _expand_ports(member.group(2)):
+                    entry = ports.setdefault(interface_key(port), {"untagged": set(), "tagged": set()})
+                    entry[member.group(1).lower()].add(vlan)
+    return {key: _membership(entry["untagged"], entry["tagged"]) for key, entry in ports.items()}
+
+
+def _parse_cx_vlans(config):
+    result = {}
+    for match, body in _config_blocks(config, re.compile(r"^interface\s+(.+?)\s*$", re.I)):
+        text = "\n".join(body)
+        access = re.search(r"(?im)^vlan access (\d+)", text)
+        native = re.search(r"(?im)^vlan trunk native (\d+)(\s+tag)?", text)
+        allowed = re.findall(r"(?im)^vlan trunk allowed (.+)$", text)
+        if access:
+            result[interface_key(match.group(1))] = _membership([int(access.group(1))])
+        elif native or allowed:
+            native_id = int(native.group(1)) if native else 1
+            tagged_native = bool(native and native.group(2))
+            tagged = set().union(*(parse_vlan_list(item) for item in allowed))
+            everything = not allowed or any(item.strip().lower() == "all" for item in allowed)
+            untagged = [] if tagged_native else [native_id]
+            result[interface_key(match.group(1))] = _membership(untagged, tagged | ({native_id} if tagged_native else set()),
+                                                                everything)
+        elif re.search(r"(?im)^no routing\b", text):
+            result[interface_key(match.group(1))] = _membership([1])
+    return result
+
+
+def _parse_comware_vlans(config):
+    result = {}
+    for match, body in _config_blocks(config, re.compile(r"^interface\s+(\S+)\s*$", re.I)):
+        name = match.group(1)
+        prefix = re.match(r"^[a-z]+", interface_key(name))
+        if not prefix or prefix.group(0) not in ("ge", "xge", "wge", "fge", "hge", "fe", "bagg"):
+            continue
+        text = "\n".join(body)
+        if re.search(r"(?im)^port link-mode route", text):
+            continue
+        link_type = re.search(r"(?im)^port link-type (\w+)", text)
+        link_type = link_type.group(1).lower() if link_type else "access"
+        if link_type == "trunk":
+            pvid = re.search(r"(?im)^port trunk pvid vlan (\d+)", text)
+            pvid = int(pvid.group(1)) if pvid else 1
+            permitted, everything = {1}, False
+            for undo, vlans in re.findall(r"(?im)^(undo )?port trunk permit vlan (.+)$", text):
+                if vlans.strip().lower() == "all":
+                    everything = not undo
+                elif undo:
+                    permitted -= parse_vlan_list(vlans)
+                else:
+                    permitted |= parse_vlan_list(vlans)
+            untagged = [pvid] if everything or pvid in permitted else []
+            result[interface_key(name)] = _membership(untagged, permitted, everything)
+        elif link_type == "hybrid":
+            untagged, tagged = set(), set()
+            for vlans, mode in re.findall(r"(?im)^port hybrid vlan (.+?) (untagged|tagged)\s*$", text):
+                (untagged if mode.lower() == "untagged" else tagged).update(parse_vlan_list(vlans))
+            result[interface_key(name)] = _membership(untagged or {1}, tagged)
+        else:
+            access = re.search(r"(?im)^port access vlan (\d+)", text)
+            result[interface_key(name)] = _membership([int(access.group(1)) if access else 1])
+    return result
+
+
+def parse_vlans(config, platform):
+    """VLAN membership per port, keyed by :func:`interface_key`."""
+    if not config:
+        return {}
+    parser = {"aruba_aos": _parse_aos_vlans, "aruba_cx": _parse_cx_vlans, "hpe_comware": _parse_comware_vlans}
+    return parser[platform](config) if platform in parser else {}
+
+
+def _compress_vlans(vlans):
+    parts, values = [], sorted(vlans)
+    start = previous = None
+    for value in values + [None]:
+        if start is not None and value == previous + 1:
+            previous = value
+            continue
+        if start is not None:
+            parts.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = value
+    return ",".join(parts)
+
+
+def vlan_label(vlans, limit=64):
+    """All VLANs of a port (untagged and tagged) as short NetBox label."""
+    if not vlans:
+        return ""
+    if vlans.get("tagged_all"):
+        return "all"
+    text = _compress_vlans(set(vlans.get("untagged", [])) | set(vlans.get("tagged", [])))
+    if len(text) > limit:
+        text = text[:limit - 1].rsplit(",", 1)[0] + "…"
+    return text
+
+
+def _vlan_config_excerpt(config):
+    """Keep only VLAN-related lines – the full configuration may contain secrets."""
+    return "\n".join(line for line in clean_output(config).splitlines() if _VLAN_CONFIG_LINE.search(line))
+
+
 def build_snapshot(outputs, platform):
     interfaces = parse_interfaces(outputs["interfaces"], platform)
+    vlans = parse_vlans(outputs.get("config", ""), platform)
+    for interface in interfaces:
+        interface["vlans"] = vlans.get(interface_key(interface["name"]))
     interface_ips = parse_interface_ips(outputs.get("ipv4_interfaces", ""), outputs.get("ipv6_interfaces", ""), platform)
     lldp_neighbors = parse_neighbors(outputs["neighbors"])
     cdp_neighbors = parse_cdp_neighbors(outputs.get("cdp_neighbors", ""))
@@ -625,7 +807,9 @@ def build_snapshot(outputs, platform):
         "neighbors": neighbors,
         "lldp_neighbors": lldp_neighbors,
         "cdp_neighbors": cdp_neighbors,
-        "raw": outputs,
+        "raw": {**{key: value for key, value in outputs.items() if key != "config"},
+                **({"vlan_config": _vlan_config_excerpt(outputs["config"])} if outputs.get("config") else {})},
+        "vlans_read": bool(outputs.get("config")),
         "lldp_disabled": outputs.get("lldp_disabled", False),
         "lldp_enabled_automatically": outputs.get("lldp_enabled_automatically", False),
         "discovered_at": time.time(),
@@ -712,6 +896,179 @@ def _device_interfaces(nb, device_id):
     return records
 
 
+MATCH_METHODS = {
+    "name": "gleicher Name",
+    "number": "gleiche Portnummer",
+    "order": "Reihenfolge",
+    "manual": "manuell",
+    "new": "neu anlegen",
+}
+
+_PORT_NAME = re.compile(r"^[A-Za-z\- ]*\d+(?:/\d+)*$")
+
+
+def _natural_key(name):
+    return [int(part) if part.isdigit() else part.casefold() for part in re.split(r"(\d+)", name)]
+
+
+def _port_number(name):
+    """Last number of a port-like name: ``1/1/5`` → 5, ``GE1/0/5`` → 5, ``5`` → 5."""
+    name = (name or "").strip()
+    return int(re.search(r"(\d+)$", name).group(1)) if _PORT_NAME.match(name) else None
+
+
+def _record_type(record):
+    value = getattr(record, "type", None)
+    return getattr(value, "value", value if isinstance(value, str) else None) or ""
+
+
+def _physical_record(record):
+    return (_record_type(record) not in ("virtual", "lag", "bridge")
+            and not re.match(r"^(?:vlan|lo|mgmt|oobm)", interface_key(record.name)))
+
+
+def _physical_interface(interface):
+    return netbox_interface_type(interface) not in ("virtual", "lag")
+
+
+def match_interfaces(interfaces, records, manual=None):
+    """Assign NetBox interfaces to discovered switch interfaces.
+
+    Order of precedence: stored manual choices (``{switch name: NetBox name}``,
+    an empty NetBox name means "create new"), equal names across vendor
+    spellings, an equal last port number (``1/1/5`` ↔ ``5``) and finally the
+    natural order of the remaining physical ports when both sides have the
+    same number left. Returns ``{switch name: (record or None, method)}``.
+    """
+    manual = manual or {}
+    by_name = {record.name: record for record in records}
+    by_key = {}
+    for record in records:
+        key = interface_key(record.name)
+        if key not in by_key or len(record.name) > len(by_key[key].name):
+            by_key[key] = record
+    result, used = {}, set()
+
+    def assign(interface, record, method):
+        result[interface["name"]] = (record, method)
+        if record is not None:
+            used.add(record.id)
+
+    for interface in interfaces:
+        if interface["name"] not in manual:
+            continue
+        target = manual[interface["name"]]
+        record = by_name.get(target) if target else None
+        if target and (record is None or record.id in used):
+            continue  # stale choice – fall back to the automatic match
+        assign(interface, record, "manual" if record else "new")
+    for interface in interfaces:
+        if interface["name"] not in result:
+            record = by_key.get(interface_key(interface["name"]))
+            if record and record.id not in used:
+                assign(interface, record, "name")
+
+    open_ports = [item for item in interfaces if item["name"] not in result and _physical_interface(item)]
+    open_records = [record for record in records if record.id not in used and _physical_record(record)]
+    ports_by_number, records_by_number = {}, {}
+    for item in open_ports:
+        ports_by_number.setdefault(_port_number(item["name"]), []).append(item)
+    for record in open_records:
+        records_by_number.setdefault(_port_number(record.name), []).append(record)
+    for number, ports in ports_by_number.items():
+        candidates = records_by_number.get(number, [])
+        if number is not None and len(ports) == 1 and len(candidates) == 1:
+            assign(ports[0], candidates[0], "number")
+
+    open_ports = [item for item in open_ports if item["name"] not in result]
+    open_records = [record for record in open_records if record.id not in used]
+    if open_ports and len(open_ports) == len(open_records):
+        open_ports.sort(key=lambda item: _natural_key(item["name"]))
+        open_records.sort(key=lambda record: _natural_key(record.name))
+        for interface, record in zip(open_ports, open_records):
+            assign(interface, record, "order")
+    for interface in interfaces:
+        result.setdefault(interface["name"], (None, "new"))
+    return result
+
+
+def _resolve_device(nb, config):
+    """The NetBox device of a switch config, or an error text."""
+    if config.get("device_id"):
+        device = nb.dcim.devices.get(int(config["device_id"]))
+        return (device, None) if device else (None, f"NetBox-Gerät #{config['device_id']} existiert nicht mehr")
+    # Switches captured in offline mode are only known by name.
+    matches = list(nb.dcim.devices.filter(name=config["name"]))
+    if len(matches) != 1:
+        return None, f"NetBox-Gerät „{config['name']}“ " + ("nicht gefunden" if not matches else "ist nicht eindeutig")
+    return matches[0], None
+
+
+def candidate_devices(nb, device):
+    """Devices a neighbor may be assigned to: the tenant group of the switch.
+
+    Falls back to the switch's tenant and, without a tenant, to all devices.
+    Returns ``(scope description, [{"id", "name"}])``.
+    """
+    tenant_id = related_id(device, "tenant")
+    scope, devices = "alle Geräte", None
+    if tenant_id:
+        tenant = nb.tenancy.tenants.get(tenant_id)
+        group_id = related_id(tenant, "group") if tenant else None
+        if group_id:
+            group = getattr(tenant, "group", None)
+            scope = f"Mandantengruppe {getattr(group, 'name', None) or group_id}"
+            devices = nb.dcim.devices.filter(tenant_group_id=group_id)
+        else:
+            scope = f"Mandant {getattr(tenant, 'name', None) or tenant_id}"
+            devices = nb.dcim.devices.filter(tenant_id=tenant_id)
+    if devices is None:
+        devices = nb.dcim.devices.all()
+    rows = [{"id": item.id, "name": item.name} for item in devices if getattr(item, "name", None) and item.id != device.id]
+    return scope, sorted(rows, key=lambda row: row["name"].casefold())
+
+
+def plan_switch_sync(nb, config, snapshot):
+    """Proposed interface mapping and neighbor devices for the review dialog."""
+    device, error = _resolve_device(nb, config)
+    if error:
+        return {"error": error}
+    records = list(nb.dcim.interfaces.filter(device_id=device.id))
+    matches = match_interfaces(snapshot["interfaces"], records, config.get("interface_map"))
+    scope, devices = candidate_devices(nb, device)
+    known = {row["id"] for row in devices}
+    lookup = _RemoteLookup(nb)
+    manual = config.get("neighbor_devices") or {}
+    neighbors = []
+    for neighbor in snapshot["neighbors"]:
+        local = neighbor.get("local_port")
+        if local in manual:
+            device_id, method = int(manual[local]) or None, "manual"
+            remote = nb.dcim.devices.get(device_id) if device_id else None
+        else:
+            remote = lookup.device(neighbor)
+            device_id, method = (remote.id if remote else None), "auto"
+        if remote and remote.id not in known and remote.id != device.id:
+            devices.append({"id": remote.id, "name": remote.name})
+            known.add(remote.id)
+        neighbors.append(dict(neighbor, device_id=device_id, method=method))
+    devices.sort(key=lambda row: row["name"].casefold())
+    return {
+        "error": None,
+        "device": {"id": device.id, "name": device.name},
+        "interfaces": [
+            {"name": item["name"], "netbox_name": record.name if record else "", "method": method,
+             "physical": _physical_interface(item), "vlan_label": vlan_label(item.get("vlans"))}
+            for item in snapshot["interfaces"]
+            for record, method in [matches[item["name"]]]
+        ],
+        "netbox_interfaces": sorted((record.name for record in records), key=_natural_key),
+        "neighbors": neighbors,
+        "device_scope": scope,
+        "devices": devices,
+    }
+
+
 class _RemoteLookup:
     """Find neighbor devices and interfaces in NetBox, cached per sync run."""
 
@@ -752,6 +1109,13 @@ class _RemoteLookup:
             record = records.get(interface_key(candidate))
             if record:
                 return record
+        # Device types often name ports "1", "2", … while LLDP reports "1/1/1".
+        number = _port_number(neighbor.get("remote_port"))
+        if number is not None:
+            found = [record for record in records.values()
+                     if _physical_record(record) and _port_number(record.name) == number]
+            if len(found) == 1:
+                return found[0]
         return None
 
 
@@ -772,37 +1136,38 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
     device-type templates and manual corrections in NetBox are preserved.
     """
     report = _new_report()
-    if config.get("device_id"):
-        device_id = int(config["device_id"])
-        device = nb.dcim.devices.get(device_id)
-        if not device:
-            report["errors"].append(f"NetBox-Gerät #{device_id} existiert nicht mehr")
-            return report
-    else:
-        # Switches captured in offline mode are only known by name.
-        matches = list(nb.dcim.devices.filter(name=config["name"]))
-        if len(matches) != 1:
-            report["errors"].append(f"NetBox-Gerät „{config['name']}“ " +
-                                    ("nicht gefunden" if not matches else "ist nicht eindeutig"))
-            return report
-        device = matches[0]
-        device_id = device.id
+    device, error = _resolve_device(nb, config)
+    if error:
+        report["errors"].append(error)
+        return report
+    device_id = device.id
     tenant_id = related_id(device, "tenant")
-    existing = _device_interfaces(nb, device_id)
+    matches = match_interfaces(snapshot["interfaces"], list(nb.dcim.interfaces.filter(device_id=device_id)),
+                               config.get("interface_map"))
     records = {}
 
     for interface in snapshot["interfaces"]:
         key = interface_key(interface["name"])
-        record = existing.get(key)
+        record, method = matches[interface["name"]]
+        label = vlan_label(interface.get("vlans"))
         try:
             if record:
                 changes = {}
                 if bool(getattr(record, "enabled", True)) != bool(interface.get("enabled", True)):
                     changes["enabled"] = bool(interface.get("enabled", True))
+                # Only written when VLANs are known, so manual labels survive
+                # routed ports and snapshots without configuration.
+                if label and (getattr(record, "label", "") or "") != label:
+                    changes["label"] = label
                 if changes:
                     report["interfaces_updated"] += 1
-                    state = "aktivieren" if changes["enabled"] else "deaktivieren"
-                    report["changes"].append(f"Interface {record.name}: {state}")
+                    texts = []
+                    if "enabled" in changes:
+                        texts.append("aktivieren" if changes["enabled"] else "deaktivieren")
+                    if "label" in changes:
+                        texts.append(f"Label „{label}“")
+                    target = record.name if method == "name" else f"{record.name} ({interface['name']})"
+                    report["changes"].append(f"Interface {target}: {', '.join(texts)}")
                     if not dry_run:
                         record.update(changes)
                 else:
@@ -814,13 +1179,15 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
                     "type": netbox_interface_type(interface),
                     "enabled": bool(interface.get("enabled", True)),
                 }
+                if label:
+                    payload["label"] = label
                 if interface.get("description"):
                     payload["description"] = interface["description"][:200]
                 report["interfaces_created"] += 1
-                report["changes"].append(f"Interface {interface['name']} neu ({payload['type']})")
+                report["changes"].append(f"Interface {interface['name']} neu ({payload['type']})"
+                                         + (f", Label „{label}“" if label else ""))
                 if not dry_run:
                     record = nb.dcim.interfaces.create(payload)
-                    existing[key] = record
             if record and not dry_run and interface.get("mac_address"):
                 assign_mac(nb, record, interface["mac_address"], "dcim.interface")
             records[key] = record
@@ -871,6 +1238,7 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
 
     if create_cables:
         lookup = _RemoteLookup(nb)
+        manual_devices = config.get("neighbor_devices") or {}
         for neighbor in snapshot["neighbors"]:
             label = f"{neighbor.get('local_port')} → {neighbor.get('system_name')} {neighbor.get('remote_port')}"
             try:
@@ -881,7 +1249,12 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
                 if local is not None and getattr(local, "cable", None):
                     report["cables_skipped"] += 1
                     continue
-                remote_device = lookup.device(neighbor)
+                if neighbor["local_port"] in manual_devices:
+                    # 0 means "no device" was chosen in the review dialog.
+                    chosen = int(manual_devices[neighbor["local_port"]] or 0)
+                    remote_device = nb.dcim.devices.get(chosen) if chosen else None
+                else:
+                    remote_device = lookup.device(neighbor)
                 if not remote_device:
                     report["cables_skipped"] += 1
                     continue

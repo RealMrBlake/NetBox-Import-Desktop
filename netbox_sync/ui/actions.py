@@ -17,6 +17,7 @@ from netbox_sync.core.switches import (
     PLATFORMS,
     describe_snapshot,
     discover_switch,
+    plan_switch_sync,
     suggest_platform,
     sync_snapshot_to_netbox,
 )
@@ -24,7 +25,7 @@ from netbox_sync.core.virtualization import load_source
 from netbox_sync.core.vm_sync import VMSyncEngine
 from netbox_sync.ui import widgets
 from netbox_sync.ui.client_dialogs import ClientPreviewDialog, ClientTargetDialog
-from netbox_sync.ui.dialogs import SyncPreviewDialog
+from netbox_sync.ui.dialogs import SwitchMappingDialog, SyncPreviewDialog
 from netbox_sync.ui.tasks import area_log, logger
 
 
@@ -412,8 +413,44 @@ class Actions:
         connect = self._connector()
         log = area_log("switch")
 
-        def preview(ctx):
+        def plan(ctx):
             nb = connect(ctx)
+            plans = []
+            for index, (switch, snapshot) in enumerate(items):
+                ctx.progress(index, len(items), switch["name"])
+                ctx.log(f"{switch['name']}: ordne Schnittstellen und Nachbarn zu …")
+                plans.append((switch, plan_switch_sync(nb, switch, snapshot)))
+            return nb, plans
+
+        def review(result):
+            nb, plans = result
+            self.state.set_netbox(nb, "ok", f"Verbunden · NetBox {nb.netbox_version}")
+            reviewable = [(switch, item) for switch, item in plans if not item["error"]]
+            needs_review = any(
+                any(entry["method"] not in ("name", "new") or (entry["method"] == "new" and entry["physical"])
+                    for entry in item["interfaces"]) or (create_cables and item["neighbors"])
+                for _switch, item in reviewable)
+
+            def ask():
+                # Started after the planning task has finished, so the next
+                # task is not rejected as "still busy".
+                if needs_review:
+                    dialog = SwitchMappingDialog(self.window, reviewable, create_cables)
+                    if not dialog.exec():
+                        return
+                    stored = {switch["id"]: switch for switch in self.state.switches}
+                    for switch, _snapshot in items:
+                        choices = dialog.result.get(switch["id"])
+                        if choices:
+                            switch.update(choices)
+                            if switch["id"] in stored:
+                                stored[switch["id"]].update(choices)
+                    self.state.touch()
+                self.tasks.run(lambda ctx: preview(ctx, nb), title="Änderungen berechnen", area="switch",
+                               on_success=show_preview, on_error=self._netbox_failed)
+            QTimer.singleShot(0, ask)
+
+        def preview(ctx, nb):
             reports = []
             for index, (switch, snapshot) in enumerate(items):
                 ctx.progress(index, len(items), switch["name"])
@@ -423,7 +460,6 @@ class Actions:
 
         def show_preview(result):
             nb, reports = result
-            self.state.set_netbox(nb, "ok", f"Verbunden · NetBox {nb.netbox_version}")
 
             def ask():
                 # Opened after the preview task has fully finished, so the
@@ -433,7 +469,7 @@ class Actions:
                     self._apply_switch_sync(nb, items, create_cables, log)
             QTimer.singleShot(0, ask)
 
-        self.tasks.run(preview, title="Änderungen berechnen", area="switch", on_success=show_preview,
+        self.tasks.run(plan, title="Zuordnung ermitteln", area="switch", on_success=review,
                        on_error=self._netbox_failed)
 
     def _apply_switch_sync(self, nb, items, create_cables, log):

@@ -3,7 +3,7 @@
 import uuid
 
 from PySide6.QtCore import QThreadPool, Qt
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QColor, QGuiApplication
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
@@ -24,7 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from netbox_sync.core.config import known_hosts_path
-from netbox_sync.core.switches import PLATFORMS, forget_host_key
+from netbox_sync.core.switches import MATCH_METHODS, PLATFORMS, forget_host_key
 from netbox_sync.core.virtualization import test_source
 from netbox_sync.ui.icons import icon
 from netbox_sync.ui.models import Column, FilterProxy, RowTableModel
@@ -566,10 +568,149 @@ class SyncPreviewDialog(_Dialog):
         self.root.addWidget(buttons)
 
 
+class SwitchMappingDialog(_Dialog):
+    """Review interface mapping and neighbor devices before computing changes.
+
+    ``plans`` is a list of ``(switch, plan)`` from ``plan_switch_sync``. After
+    acceptance ``result`` maps switch IDs to ``interface_map`` and
+    ``neighbor_devices`` to be stored in the profile.
+    """
+
+    NEW = "\x00new"
+
+    def __init__(self, parent, plans, create_cables):
+        super().__init__(parent, "Zuordnung prüfen",
+                         "Schnittstellen, deren Name auf dem Switch anders lautet als in NetBox, wurden automatisch "
+                         "zugeordnet. Bitte prüfen und bei Bedarf korrigieren – die Auswahl wird im Profil gespeichert.",
+                         width=820)
+        self.resize(980, 660)
+        self.plans = plans
+        self.result = None
+        tabs = QTabWidget()
+
+        # Interfaces --------------------------------------------------------
+        interface_page = QWidget()
+        interface_layout = QVBoxLayout(interface_page)
+        interface_layout.setContentsMargins(0, 12, 0, 0)
+        self.only_unclear = checkbox("Nur Schnittstellen ohne Namensgleichheit anzeigen", True)
+        interface_layout.addWidget(self.only_unclear)
+        self.interface_table = QTableWidget(0, 5)
+        self.interface_table.setHorizontalHeaderLabels(["Switch", "Schnittstelle (Switch)", "VLANs",
+                                                        "NetBox-Schnittstelle", "Zuordnung"])
+        self.interface_rows = []
+        for switch, plan in plans:
+            vlans = {item["name"]: item["vlan_label"] for item in plan["interfaces"]}
+            choices = [("＋ neu anlegen", self.NEW)] + [(name, name) for name in plan["netbox_interfaces"]]
+            for item in plan["interfaces"]:
+                if not item["physical"] and item["method"] in ("name", "new"):
+                    continue
+                row = self.interface_table.rowCount()
+                self.interface_table.insertRow(row)
+                combo = QComboBox()
+                for text, data in choices:
+                    combo.addItem(text, data)
+                combo.setCurrentIndex(max(0, combo.findData(item["netbox_name"] or self.NEW)))
+                for column, text in enumerate((switch["name"], item["name"], vlans.get(item["name"], ""))):
+                    self.interface_table.setItem(row, column, QTableWidgetItem(text))
+                self.interface_table.setCellWidget(row, 3, combo)
+                method = QTableWidgetItem(MATCH_METHODS.get(item["method"], item["method"]))
+                if item["method"] in ("number", "order"):
+                    method.setForeground(QColor(theme.color("warning")))
+                self.interface_table.setItem(row, 4, method)
+                self.interface_rows.append((row, switch, item, combo))
+        self._prepare_table(self.interface_table, (140, 170, 110, 220, 150))
+        interface_layout.addWidget(self.interface_table, 1)
+        unclear = sum(1 for _row, _switch, item, _combo in self.interface_rows if item["method"] != "name")
+        tabs.addTab(interface_page, f"Schnittstellen ({unclear} zu prüfen)")
+        self.only_unclear.toggled.connect(self._filter_interfaces)
+        self._filter_interfaces(True)
+
+        # Neighbors -----------------------------------------------------------
+        self.neighbor_rows = []
+        if create_cables:
+            neighbor_page = QWidget()
+            neighbor_layout = QVBoxLayout(neighbor_page)
+            neighbor_layout.setContentsMargins(0, 12, 0, 0)
+            scopes = sorted({plan["device_scope"] for _switch, plan in plans})
+            neighbor_layout.addWidget(label(
+                "Für jeden Nachbarn kann ein bestehendes NetBox-Gerät gewählt werden (Auswahl aus: "
+                f"{', '.join(scopes)}). Die Gegenstelle wird über den Portnamen gesucht; „kein Kabel“ "
+                "überspringt den Nachbarn.", muted=True, wrap=True))
+            self.neighbor_table = QTableWidget(0, 5)
+            self.neighbor_table.setHorizontalHeaderLabels(["Switch", "Lokaler Port", "Nachbar (LLDP/CDP)",
+                                                           "Nachbar-Port", "NetBox-Gerät"])
+            for switch, plan in plans:
+                for neighbor in plan["neighbors"]:
+                    row = self.neighbor_table.rowCount()
+                    self.neighbor_table.insertRow(row)
+                    combo = SearchableComboBox("Gerät suchen …")
+                    combo.set_items([("– kein Kabel –", 0)] + [(device["name"], device["id"]) for device in plan["devices"]],
+                                    neighbor.get("device_id") or 0)
+                    texts = (switch["name"], neighbor["local_port"], neighbor.get("system_name") or
+                             neighbor.get("management_ip") or "", neighbor.get("remote_port") or "")
+                    for column, text in enumerate(texts):
+                        self.neighbor_table.setItem(row, column, QTableWidgetItem(text))
+                    self.neighbor_table.setCellWidget(row, 4, combo)
+                    self.neighbor_rows.append((switch, neighbor, combo))
+            self._prepare_table(self.neighbor_table, (140, 110, 220, 150, 260))
+            neighbor_layout.addWidget(self.neighbor_table, 1)
+            found = sum(1 for _switch, neighbor, _combo in self.neighbor_rows if neighbor.get("device_id"))
+            tabs.addTab(neighbor_page, f"Nachbarn ({found} von {len(self.neighbor_rows)} zugeordnet)")
+
+        self.root.addWidget(tabs, 1)
+        self.root.addWidget(self.error_banner)
+        buttons, _ok = form_dialog_buttons(self, "Weiter zur Vorschau")
+        self.root.addWidget(buttons)
+
+    @staticmethod
+    def _prepare_table(table, widths):
+        table.verticalHeader().hide()
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.setSelectionMode(QTableWidget.NoSelection)
+        table.horizontalHeader().setStretchLastSection(True)
+        for column, width in enumerate(widths):
+            table.setColumnWidth(column, width)
+
+    def _filter_interfaces(self, only_unclear):
+        for row, _switch, item, _combo in self.interface_rows:
+            self.interface_table.setRowHidden(row, only_unclear and item["method"] == "name")
+
+    def accept(self):
+        result = {switch["id"]: {"interface_map": dict(switch.get("interface_map") or {}),
+                                 "neighbor_devices": dict(switch.get("neighbor_devices") or {})}
+                  for switch, _plan in self.plans}
+        used = {}
+        for _row, switch, item, combo in self.interface_rows:
+            chosen = combo.currentData()
+            target = "" if chosen == self.NEW else chosen
+            mapping = result[switch["id"]]["interface_map"]
+            if target and (switch["id"], target) in used:
+                self.show_error(f"{switch['name']}: „{target}“ ist mehreren Schnittstellen zugeordnet "
+                                f"({used[(switch['id'], target)]}, {item['name']}).")
+                return
+            if target:
+                used[(switch["id"], target)] = item["name"]
+            # Plain name matches stay automatic; everything else is remembered.
+            if item["method"] == "name" and target == item["netbox_name"]:
+                mapping.pop(item["name"], None)
+            else:
+                mapping[item["name"]] = target
+        for switch, neighbor, combo in self.neighbor_rows:
+            chosen = combo.valid_data()
+            chosen = int(chosen or 0)
+            stored = result[switch["id"]]["neighbor_devices"]
+            if neighbor["method"] == "auto" and chosen == (neighbor.get("device_id") or 0):
+                stored.pop(neighbor["local_port"], None)
+            else:
+                stored[neighbor["local_port"]] = chosen
+        self.result = result
+        super().accept()
+
+
 class RawDataDialog(_Dialog):
     SECTIONS = {
         "interfaces": "Schnittstellen", "ipv4_interfaces": "IPv4", "ipv6_interfaces": "IPv6",
-        "neighbors": "LLDP", "cdp_neighbors": "CDP", "lldp_status": "LLDP-Status",
+        "neighbors": "LLDP", "cdp_neighbors": "CDP", "vlan_config": "VLAN-Konfiguration", "lldp_status": "LLDP-Status",
     }
 
     def __init__(self, parent, items, selected_id=None):

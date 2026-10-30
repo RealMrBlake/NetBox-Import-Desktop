@@ -10,3 +10,4 @@ output/
 # Lokale Konfigurationen und Zugangsdaten
 config.json
 *.tmp
+.gitea-token

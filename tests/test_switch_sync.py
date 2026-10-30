@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 from fake_netbox import FakeNetBox, Record
 
-from netbox_sync.core.switches import build_snapshot, sync_snapshot_to_netbox
+from netbox_sync.core.switches import build_snapshot, match_interfaces, plan_switch_sync, sync_snapshot_to_netbox
 from test_switches import COMWARE_BRIEF, COMWARE_LLDP
 
 
@@ -63,3 +63,64 @@ def test_offline_switch_is_resolved_by_name():
 
     missing = sync_snapshot_to_netbox(nb, {"id": "s", "name": "unbekannt"}, snapshot, dry_run=True)
     assert missing["errors"] == ["NetBox-Gerät „unbekannt“ nicht gefunden"]
+
+
+def _numbered_setup():
+    """NetBox device type with ports "1" … "3", switch reports "1/1/x"."""
+    nb = FakeNetBox()
+    group = SimpleNamespace(id=3, name="Kunde")
+    nb.tenancy.tenants.records.append(Record(nb.tenancy.tenants, id=7, name="Muster", group=group))
+    nb.dcim.devices.records += [
+        Record(nb.dcim.devices, id=1, name="access-01", tenant=SimpleNamespace(id=7), tenant_group=group),
+        Record(nb.dcim.devices, id=2, name="server-01", tenant=SimpleNamespace(id=7), tenant_group=group),
+        Record(nb.dcim.devices, id=3, name="fremd", tenant=None, tenant_group=None),
+    ]
+    for index, name in enumerate(("1", "2", "3"), start=1):
+        nb.dcim.interfaces.records.append(Record(nb.dcim.interfaces, id=index, name=name, device=SimpleNamespace(id=1),
+                                                 type=SimpleNamespace(value="1000base-t"), enabled=True, cable=None,
+                                                 label=""))
+    nb.dcim.interfaces.records.append(Record(nb.dcim.interfaces, id=20, name="eth0", device=SimpleNamespace(id=2),
+                                             type=SimpleNamespace(value="1000base-t"), enabled=True, cable=None))
+    interfaces = [
+        {"name": f"1/1/{number}", "enabled": True, "connected": True, "media": "1GbT", "speed_mbps": 1000,
+         "ip_addresses": [], "vlans": {"untagged": [10 * number], "tagged": [], "tagged_all": False}}
+        for number in (1, 2, 3)
+    ]
+    neighbor = {"local_port": "1/1/2", "system_name": "unbekannt", "remote_port": "eth0", "port_description": "",
+                "management_ip": "", "protocol": "LLDP"}
+    snapshot = {"interfaces": interfaces, "neighbors": [neighbor]}
+    return nb, {"id": "s", "name": "access-01", "device_id": 1}, snapshot
+
+
+def test_ports_are_mapped_by_number_and_labelled_with_vlans():
+    nb, switch, snapshot = _numbered_setup()
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False)
+    assert report["errors"] == [] and report["interfaces_created"] == 0
+    assert sorted(nb.dcim.interfaces.updates) == [(1, {"label": "10"}), (2, {"label": "20"}), (3, {"label": "30"})]
+
+
+def test_ports_are_mapped_by_order_and_manual_choice_wins():
+    nb, switch, snapshot = _numbered_setup()
+    for item, name in zip(snapshot["interfaces"], ("1/0/1", "1/0/2", "2/0/1")):
+        item["name"] = name  # "2/0/1" breaks the unique port numbers
+    matches = match_interfaces(snapshot["interfaces"], nb.dcim.interfaces.filter(device_id=1))
+    assert {name: (record.name, method) for name, (record, method) in matches.items()} == {
+        "1/0/1": ("1", "order"), "1/0/2": ("2", "number"), "2/0/1": ("3", "order")}
+    manual = match_interfaces(snapshot["interfaces"], nb.dcim.interfaces.filter(device_id=1), {"2/0/1": ""})
+    assert manual["2/0/1"] == (None, "new")
+
+
+def test_plan_offers_tenant_group_devices_and_manual_neighbor_creates_cable():
+    nb, switch, snapshot = _numbered_setup()
+    plan = plan_switch_sync(nb, switch, snapshot)
+    assert plan["device_scope"] == "Mandantengruppe Kunde"
+    assert [device["name"] for device in plan["devices"]] == ["server-01"]
+    assert plan["neighbors"][0]["device_id"] is None
+    assert {item["name"]: item["method"] for item in plan["interfaces"]}["1/1/1"] == "number"
+
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, dry_run=True)
+    assert report["cables_created"] == 0
+    switch["neighbor_devices"] = {"1/1/2": 2}
+    report = sync_snapshot_to_netbox(nb, switch, snapshot)
+    cable = nb.dcim.cables.created[0]
+    assert cable["a_terminations"][0]["object_id"] == 2 and cable["b_terminations"][0]["object_id"] == 20

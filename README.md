@@ -54,6 +54,14 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
   sent after confirmation
 - Interface types from device type templates are left untouched; Comware short
   names (`GE1/0/1`) are mapped to full NetBox names (`GigabitEthernet1/0/1`)
+- VLAN membership per port (untagged and tagged, read from the running
+  configuration) is written to the interface **label**, e.g. `10` or `1,20-22`;
+  only VLAN-related lines of the configuration are kept in the raw data
+- Automatic port mapping when NetBox names differ from the switch (e.g. `5` ↔
+  `1/1/5`): equal name, then equal port number, then natural order
+- **Mapping review** before the preview: non-obvious port mappings and every
+  LLDP/CDP neighbour can be corrected; a neighbour can be assigned manually to
+  any device of the switch's tenant group. Choices are stored in the profile
 - Cables from LLDP/CDP, also with FQDN system names or via the management IP
 - The switch configuration is only changed when "Enable LLDP if needed" is
   explicitly switched on

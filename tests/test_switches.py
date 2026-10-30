@@ -201,3 +201,103 @@ def test_speed_parsing():
     assert switches.speed_mbps("1000FDx") == 1000
     assert switches.speed_mbps("10GigFD") == 10000
     assert switches.speed_mbps("UP   1G(a)   F(a)") == 1000
+
+
+AOS_CONFIG = """
+vlan 1
+   name "DEFAULT_VLAN"
+   untagged 1,3-4,Trk1
+   no untagged 2
+   exit
+vlan 10
+   name "Server"
+   untagged 2
+   tagged 49,Trk1
+   exit
+vlan 20
+   tagged 1/1-1/2,49
+   exit
+"""
+
+CX_CONFIG = """
+interface 1/1/1
+    no shutdown
+    no routing
+    vlan access 10
+interface 1/1/2
+    no routing
+    vlan trunk native 1
+    vlan trunk allowed 1,20-22
+interface 1/1/3
+    no routing
+interface 1/1/49
+    ip address 10.0.0.1/24
+interface lag 1
+    no routing
+    vlan trunk native 5 tag
+    vlan trunk allowed all
+"""
+
+COMWARE_CONFIG = """
+#
+interface GigabitEthernet1/0/1
+ port link-mode bridge
+ port access vlan 10
+#
+interface GigabitEthernet1/0/2
+ port link-mode bridge
+#
+interface GigabitEthernet1/0/3
+ port link-type hybrid
+ port hybrid vlan 30 40 tagged
+ port hybrid vlan 1 untagged
+#
+interface Ten-GigabitEthernet1/0/49
+ port link-mode bridge
+ port link-type trunk
+ undo port trunk permit vlan 1
+ port trunk permit vlan 10 20 to 22
+ port trunk pvid vlan 10
+#
+interface Vlan-interface10
+ ip address 10.0.0.1 255.255.255.0
+#
+"""
+
+
+def test_parse_vlans_aruba_aos():
+    vlans = switches.parse_vlans(AOS_CONFIG, "aruba_aos")
+    assert vlans[interface_key("1")] == {"untagged": [1], "tagged": [], "tagged_all": False}
+    assert vlans[interface_key("2")]["untagged"] == [10]
+    assert vlans[interface_key("49")] == {"untagged": [], "tagged": [10, 20], "tagged_all": False}
+    assert vlans[interface_key("Trk1")] == {"untagged": [1], "tagged": [10], "tagged_all": False}
+    assert vlans[interface_key("1/2")]["tagged"] == [20]
+
+
+def test_parse_vlans_aruba_cx():
+    vlans = switches.parse_vlans(CX_CONFIG, "aruba_cx")
+    assert switches.vlan_label(vlans[interface_key("1/1/1")]) == "10"
+    assert switches.vlan_label(vlans[interface_key("1/1/2")]) == "1,20-22"
+    assert switches.vlan_label(vlans[interface_key("1/1/3")]) == "1"
+    assert interface_key("1/1/49") not in vlans
+    assert switches.vlan_label(vlans[interface_key("lag1")]) == "all"
+
+
+def test_parse_vlans_comware():
+    vlans = switches.parse_vlans(COMWARE_CONFIG, "hpe_comware")
+    assert switches.vlan_label(vlans[interface_key("GE1/0/1")]) == "10"
+    assert switches.vlan_label(vlans[interface_key("GE1/0/2")]) == "1"
+    assert vlans[interface_key("GE1/0/3")] == {"untagged": [1], "tagged": [30, 40], "tagged_all": False}
+    assert vlans[interface_key("XGE1/0/49")] == {"untagged": [10], "tagged": [20, 21, 22], "tagged_all": False}
+    assert interface_key("Vlan-interface10") not in vlans
+
+
+def test_vlan_label_is_short_and_snapshot_hides_config():
+    many = {"untagged": [], "tagged": list(range(100, 400, 2)), "tagged_all": False}
+    assert len(switches.vlan_label(many)) <= 64 and switches.vlan_label(many).endswith("…")
+    snapshot = build_snapshot({"interfaces": COMWARE_BRIEF, "neighbors": "",
+                               "config": COMWARE_CONFIG + "\n local-user admin\n  password hash $h$secret\n"},
+                              "hpe_comware")
+    by_name = {item["name"]: item for item in snapshot["interfaces"]}
+    assert by_name["GigabitEthernet1/0/1"]["vlans"]["untagged"] == [10]
+    assert "config" not in snapshot["raw"] and "secret" not in snapshot["raw"]["vlan_config"]
