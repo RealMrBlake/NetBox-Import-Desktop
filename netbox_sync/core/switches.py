@@ -1210,24 +1210,24 @@ def plan_switch_sync(nb, config, snapshot):
         neighbors.append(dict(neighbor, device_id=device_id, method=method))
     devices.sort(key=lambda row: row["name"].casefold())
 
-    tenant_vrfs = {vrf.id: vrf.name for vrf in nb.ipam.vrfs.filter(tenant_id=tenant_id)}
-    vrfs = sorted(tenant_vrfs.values(), key=str.casefold)
-    stored_vrfs = config.get("network_vrfs") or {}
-    create_prefixes = config.get("create_prefixes")
+    vrf_records = candidate_vrfs(nb, tenant_id)
+    vrfs = [{"id": vrf.id, "label": vrf_choice_label(vrf)}
+            for vrf in sorted(vrf_records, key=lambda item: (item.name or "").casefold())]
     networks = []
     for network in snapshot_networks(snapshot):
-        # Where the prefix already exists: "" = global, otherwise a tenant VRF.
-        existing = set()
-        for prefix in nb.ipam.prefixes.filter(prefix=network):
-            vrf_id = related_id(prefix, "vrf")
-            if vrf_id is None or vrf_id in tenant_vrfs:
-                existing.add(tenant_vrfs.get(vrf_id, ""))
-        existing = sorted(existing)
-        vrf = stored_vrfs[network] if network in stored_vrfs else (existing[0] if existing else "")
-        if vrf and vrf not in vrfs:
-            vrfs.append(vrf)  # chosen earlier as new VRF, not created yet
-        networks.append({"network": network, "vrf": vrf, "existing_vrfs": existing,
-                         "create": create_prefixes is None or network in create_prefixes})
+        # Where the prefix already exists: 0 = global, otherwise a VRF of the tenant group.
+        existing = sorted({related_id(prefix, "vrf") or 0 for prefix in nb.ipam.prefixes.filter(prefix=network)}
+                          & ({0} | {vrf.id for vrf in vrf_records}), key=lambda value: (value == 0, value))
+        choice = _network_choice(config, network)
+        if choice is not None:
+            vrf_id = _resolve_vrf_choice(choice, vrf_records, tenant_id)
+            vrf_id = vrf_id if isinstance(vrf_id, int) else 0
+            networks.append({"network": network, "vrf_id": vrf_id,
+                             "vrf_name": choice.get("vrf_name") if not vrf_id else "",
+                             "existing": existing, "create": bool(choice.get("create")), "stored": True})
+        else:
+            networks.append({"network": network, "vrf_id": existing[0] if existing else 0, "vrf_name": "",
+                             "existing": existing, "create": True, "stored": False})
 
     names = {int(key): value for key, value in (snapshot.get("vlan_names") or {}).items()}
     candidates, vlan_matches = _switch_vlan_matches(nb, config, snapshot, tenant_id, related_id(device, "site"))
@@ -1321,33 +1321,80 @@ class _RemoteLookup:
 _NEW = "new"  # placeholder ID of objects a dry run would create
 
 
+def candidate_vrfs(nb, tenant_id):
+    """VRFs of the switch's tenant and of its tenant group."""
+    tenant = nb.tenancy.tenants.get(tenant_id)
+    group_id = related_id(tenant, "group") if tenant else None
+    found = {vrf.id: vrf for vrf in nb.ipam.vrfs.filter(tenant_id=tenant_id)}
+    if group_id:
+        found.update({vrf.id: vrf for vrf in nb.ipam.vrfs.filter(tenant_group_id=group_id)})
+    return list(found.values())
+
+
+def vrf_choice_label(vrf):
+    owner = getattr(getattr(vrf, "tenant", None), "name", None)
+    return vrf.name + (f" ({owner})" if owner else "")
+
+
+def _network_choice(config, network):
+    """Stored decision ``{"vrf_id", "vrf_name", "create"}`` for a network, or ``None``."""
+    choice = (config.get("network_map") or {}).get(network)
+    if choice is not None:
+        return choice
+    # Profiles up to 4.6.0 stored a VRF name and approved prefixes per switch.
+    legacy_vrfs, legacy_create = config.get("network_vrfs") or {}, config.get("create_prefixes")
+    if network not in legacy_vrfs and legacy_create is None:
+        return None
+    return {"vrf_id": None, "vrf_name": legacy_vrfs.get(network) or "", "create": network in (legacy_create or [])}
+
+
+def _resolve_vrf_choice(choice, vrf_records, tenant_id):
+    """Existing VRF ID, ``None`` for global or the name of a VRF still to create."""
+    by_id = {vrf.id: vrf for vrf in vrf_records}
+    if choice.get("vrf_id") in by_id:
+        return choice["vrf_id"]
+    name = (choice.get("vrf_name") or "").strip()
+    if not name:
+        return None
+    named = sorted((vrf for vrf in vrf_records if vrf.name.casefold() == name.casefold()),
+                   key=lambda vrf: related_id(vrf, "tenant") != tenant_id)
+    return named[0].id if named else name
+
+
 def _sync_vrfs(nb, config, snapshot, tenant_id, dry_run, report):
-    """``{network: VRF ID or None}``; VRFs chosen by name are created for the tenant."""
-    by_name = {vrf.name: vrf.id for vrf in nb.ipam.vrfs.filter(tenant_id=tenant_id)}
-    chosen = config.get("network_vrfs") or {}
+    """``{network: VRF ID or None}``; new VRFs are created for the switch's tenant."""
+    vrf_records = candidate_vrfs(nb, tenant_id)
+    created = {}
     result = {}
     for network in snapshot_networks(snapshot):
-        name = chosen.get(network) or ""
-        if name and name not in by_name:
-            report["vrfs_created"] += 1
-            report["changes"].append(f"VRF {name} neu")
-            by_name[name] = _NEW if dry_run else nb.ipam.vrfs.create({"name": name, "tenant": tenant_id}).id
-        result[network] = by_name[name] if name else None
+        choice = _network_choice(config, network) or {}
+        resolved = _resolve_vrf_choice(choice, vrf_records, tenant_id)
+        if isinstance(resolved, str):
+            if resolved not in created:
+                report["vrfs_created"] += 1
+                report["changes"].append(f"VRF {resolved} neu")
+                created[resolved] = _NEW if dry_run else nb.ipam.vrfs.create({"name": resolved, "tenant": tenant_id}).id
+            resolved = created[resolved]
+        result[network] = resolved
     return result
 
 
 def _sync_prefixes(nb, config, snapshot, tenant_id, vrf_ids, dry_run, report):
     """Create missing prefixes that were approved; existing ones stay untouched."""
-    approved = set(config.get("create_prefixes") or [])
     for network in snapshot_networks(snapshot):
         vrf_id = vrf_ids.get(network)
-        if network not in approved:
+        if not (_network_choice(config, network) or {}).get("create"):
             continue
         if vrf_id != _NEW and list(nb.ipam.prefixes.filter(prefix=network, vrf_id=vrf_id or "null")):
             continue
         try:
             report["prefixes_created"] += 1
-            vrf_name = (config.get("network_vrfs") or {}).get(network) or "global"
+            if not vrf_id:
+                vrf_name = "global"
+            elif vrf_id == _NEW:
+                vrf_name = f"VRF {_network_choice(config, network).get('vrf_name')}"
+            else:
+                vrf_name = f"VRF {getattr(nb.ipam.vrfs.get(vrf_id), 'name', vrf_id)}"
             report["changes"].append(f"Prefix {network} neu ({vrf_name})")
             if not dry_run:
                 nb.ipam.prefixes.create({"prefix": network, "status": "active", "tenant": tenant_id, "vrf": vrf_id})

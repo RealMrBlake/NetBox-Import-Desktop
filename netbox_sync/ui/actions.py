@@ -405,9 +405,11 @@ class Actions:
         if not self.require_netbox_config():
             return
         by_id = {switch["id"]: switch for switch in self.state.switches}
-        # VLAN decisions are shared by all switches of the profile.
+        # VLAN and network decisions are shared by all switches of the profile.
         vlan_map = self.state.profile.setdefault("vlan_map", {})
-        items = [(dict(by_id[switch_id], vlan_map=dict(vlan_map)), self.state.switch_snapshots[switch_id])
+        network_map = self.state.profile.setdefault("network_map", {})
+        items = [(dict(by_id[switch_id], vlan_map=dict(vlan_map), network_map=dict(network_map)),
+                  self.state.switch_snapshots[switch_id])
                  for switch_id in switch_ids if switch_id in by_id and switch_id in self.state.switch_snapshots]
         if not items:
             widgets.message(self.window, "Keine Daten", "Bitte die Switche zuerst auslesen.", "info")
@@ -431,7 +433,8 @@ class Actions:
             needs_review = any(
                 any(entry["method"] not in ("name", "new") or (entry["method"] == "new" and entry["physical"])
                     for entry in item["interfaces"]) or (create_cables and item["neighbors"])
-                or item["networks"] or any(not vlan["stored"] and vlan["method"] in ("new", "ambiguous") for vlan in item["vlans"])
+                or any(not network["stored"] and not network["existing"] for network in item["networks"])
+                or any(not vlan["stored"] and vlan["method"] in ("new", "ambiguous") for vlan in item["vlans"])
                 for _switch, item in reviewable)
 
             def ask():
@@ -444,13 +447,18 @@ class Actions:
                     stored = {switch["id"]: switch for switch in self.state.switches}
                     vlan_map.clear()
                     vlan_map.update(dialog.vlan_map)
+                    network_map.clear()
+                    network_map.update(dialog.network_map)
                     for switch, _snapshot in items:
                         choices = dialog.result.get(switch["id"])
                         if choices:
                             switch.update(choices)
                             if switch["id"] in stored:
                                 stored[switch["id"]].update(choices)
-                        switch["vlan_map"] = dict(vlan_map)
+                        switch.update(vlan_map=dict(vlan_map), network_map=dict(network_map))
+                        for legacy in ("network_vrfs", "create_prefixes", "create_vlans"):
+                            switch.pop(legacy, None)
+                            stored.get(switch["id"], {}).pop(legacy, None)
                     self.state.touch()
                     self.state.switches_changed.emit()  # ignored VLANs vanish from the VLAN column
                 self.tasks.run(lambda ctx: preview(ctx, nb), title="Änderungen berechnen", area="switch",

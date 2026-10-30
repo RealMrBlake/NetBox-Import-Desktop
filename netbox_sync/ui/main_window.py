@@ -35,6 +35,7 @@ from netbox_sync.ui.resources import resource_path
 from netbox_sync.ui.state import AppState
 from netbox_sync.ui.tasks import TaskManager, log_bus
 from netbox_sync.ui.theme import theme
+from netbox_sync.ui.updates import UpdateManager
 from netbox_sync.ui.widgets import Badge, Toast, button, label
 
 NAVIGATION = (
@@ -81,6 +82,7 @@ class MainWindow(QMainWindow):
         self.state = AppState()
         self.tasks = TaskManager()
         self.actions = Actions(self)
+        self.updates = UpdateManager(self)
         self.pages = {}
         self.nav_buttons = {}
         self.unseen_errors = 0

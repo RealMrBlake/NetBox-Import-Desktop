@@ -21,6 +21,8 @@ DEFAULT_SETTINGS = {
     "create_cables": True,
     "offline_mode": False,        # collect and export to JSON without NetBox
     "parallel_wmi": 8,            # concurrent WinRM sessions for client scans
+    "auto_update_check": True,    # look for a newer Gitea release on start
+    "skipped_version": "",        # release the user chose to skip
 }
 
 log = logging.getLogger(__name__)
@@ -118,6 +120,8 @@ def empty_profile(name):
         "host_map": {},
         # Switch VLAN decisions for all switches: "<vid>" -> {"action": "map"|"new"|"skip"|"ignore", ...}.
         "vlan_map": {},
+        # Switch network decisions: "<network>" -> {"vrf_id", "vrf_name" (new VRF), "create": prefix}.
+        "network_map": {},
         # Windows client scan: targets and options, never a password.
         "clients": dict(DEFAULT_CLIENT_OPTIONS),
     }
@@ -167,6 +171,7 @@ class ProfileStore:
                 "cluster_map": dict(record.get("cluster_map", {})),
                 "host_map": dict(record.get("host_map", {})),
                 "vlan_map": dict(record.get("vlan_map", {})),
+                "network_map": dict(record.get("network_map", {})),
                 "clients": {**DEFAULT_CLIENT_OPTIONS, **{key: value for key, value in record.get("clients", {}).items()
                                                          if key in DEFAULT_CLIENT_OPTIONS}},
             })
@@ -174,11 +179,15 @@ class ProfileStore:
                 profile["sources"].append(self._decrypt_record(source, f"{name}: {source.get('name', 'Quelle')}"))
             for switch in record.get("switches", []):
                 profile["switches"].append(self._decrypt_record(switch, f"{name}: {switch.get('name', 'Switch')}"))
-            # Migration from 4.5: VLAN decisions were stored per switch.
+            # Migration from 4.5/4.6: VLAN and network decisions were stored per switch.
             for switch in profile["switches"]:
                 for vid, choice in (switch.pop("vlan_map", None) or {}).items():
                     profile["vlan_map"].setdefault(vid, choice)
                 switch.pop("create_vlans", None)
+                approved = switch.pop("create_prefixes", None) or []
+                for network, vrf_name in (switch.pop("network_vrfs", None) or {}).items():
+                    profile["network_map"].setdefault(network, {"vrf_id": None, "vrf_name": vrf_name or "",
+                                                                "create": network in approved})
 
             # Migration from v2: one VMware source embedded in each profile.
             if not profile["sources"] and record.get("esxi_host"):
@@ -237,6 +246,7 @@ class ProfileStore:
                 "cluster_map": dict(profile.get("cluster_map", {})),
                 "host_map": dict(profile.get("host_map", {})),
                 "vlan_map": dict(profile.get("vlan_map", {})),
+                "network_map": dict(profile.get("network_map", {})),
                 "clients": dict(profile.get("clients", DEFAULT_CLIENT_OPTIONS)),
             })
 

@@ -81,6 +81,18 @@ class SettingsPage(Page):
                        "nicht auf einem anderen Rechner entschlüsselt werden.", muted=True, wrap=True))
         self.body.addWidget(data)
 
+        updates = Card("Updates", "Neue Versionen kommen aus den Releases von Netbox-Import-Desktop (Gitea).")
+        line = QHBoxLayout()
+        self.auto_update = checkbox("Beim Start nach Updates suchen")
+        line.addWidget(self.auto_update)
+        line.addStretch(1)
+        line.addWidget(button("Jetzt nach Updates suchen", "refresh", on_click=lambda: window.updates.check()))
+        updates.add(line)
+        updates.add(label("Vor der Installation wird immer gefragt. Die installierte Version aktualisiert sich über "
+                          "das Setup, die portable EXE tauscht sich selbst aus; danach startet die Anwendung neu.",
+                          muted=True, wrap=True))
+        self.body.addWidget(updates)
+
         about = Card("Über")
         about.add(label(f"<b>{APP_NAME}</b> Version {APP_VERSION}"))
         about.add(label(f"© {APP_PUBLISHER}", muted=True))
@@ -90,18 +102,21 @@ class SettingsPage(Page):
         self.parallel.valueChanged.connect(lambda value: self.state.update_settings(parallel_ssh=value))
         self.enable_lldp.toggled.connect(lambda value: self.state.update_settings(enable_lldp=value))
         self.parallel_wmi.valueChanged.connect(lambda value: self.state.update_settings(parallel_wmi=value))
+        self.auto_update.toggled.connect(lambda value: self.state.update_settings(auto_update_check=value))
         self.state.settings_changed.connect(self.load)
         self.load()
 
     def load(self):
         settings = self.state.settings
-        for widget in (self.parallel, self.parallel_wmi, self.enable_lldp, *self.theme_buttons.values()):
+        widgets_ = (self.parallel, self.parallel_wmi, self.enable_lldp, self.auto_update, *self.theme_buttons.values())
+        for widget in widgets_:
             widget.blockSignals(True)
         self.parallel.setValue(int(settings.get("parallel_ssh", 4)))
         self.parallel_wmi.setValue(int(settings.get("parallel_wmi", 8)))
         self.enable_lldp.setChecked(bool(settings.get("enable_lldp")))
+        self.auto_update.setChecked(bool(settings.get("auto_update_check", True)))
         self.theme_buttons.get(settings.get("theme", "system"), self.theme_buttons["system"]).setChecked(True)
-        for widget in (self.parallel, self.parallel_wmi, self.enable_lldp, *self.theme_buttons.values()):
+        for widget in widgets_:
             widget.blockSignals(False)
 
     def _set_theme(self, mode):

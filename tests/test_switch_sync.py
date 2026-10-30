@@ -136,7 +136,8 @@ def test_missing_vlans_prefixes_and_vrfs_are_only_created_when_approved():
     plan = plan_switch_sync(nb, switch, snapshot)
     assert [(item["vid"], item["netbox_id"], item["method"], item["new_name"]) for item in plan["vlans"]] == [
         (1, None, "new", "VLAN1"), (10, 110, "vid", "VLAN10"), (20, None, "new", "Clients")]
-    assert plan["networks"] == [{"network": "10.1.0.0/24", "vrf": "", "existing_vrfs": [], "create": True}]
+    assert plan["networks"] == [{"network": "10.1.0.0/24", "vrf_id": 0, "vrf_name": "", "existing": [],
+                                 "create": True, "stored": False}]
 
     # Not approved: nothing is created, only the existing VLAN 10 is assigned.
     report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False, dry_run=True)
@@ -146,8 +147,7 @@ def test_missing_vlans_prefixes_and_vrfs_are_only_created_when_approved():
     assert nb.dcim.interfaces.get(1).untagged_vlan == 110 and nb.dcim.interfaces.get(1).mode == "access"
     assert nb.ipam.ip_addresses.created[0]["tenant"] == 7 and nb.ipam.ip_addresses.created[0]["vrf"] is None
 
-    switch.update({"vlan_map": {"20": {"action": "new", "name": "Clients"}}, "create_prefixes": ["10.1.0.0/24"],
-                   "network_vrfs": {"10.1.0.0/24": "Kunde-Mgmt"}})
+    switch.update({"vlan_map": {"20": {"action": "new", "name": "Clients"}}, "network_map": {"10.1.0.0/24": {"vrf_id": None, "vrf_name": "Kunde-Mgmt", "create": True}}})
     report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False)
     assert report["errors"] == []
     assert nb.ipam.vrfs.created == [{"name": "Kunde-Mgmt", "tenant": 7}]
@@ -242,3 +242,41 @@ def test_vlan_decisions_move_from_switches_to_the_profile(tmp_path):
     loaded = store.load()[0]["Kunde"]
     assert loaded["vlan_map"] == {"5": {"action": "ignore"}}
     assert "vlan_map" not in loaded["switches"][0] and "create_vlans" not in loaded["switches"][0]
+
+
+def test_vrfs_of_the_tenant_group_are_offered_and_found():
+    nb, switch, snapshot = _numbered_setup()
+    group = SimpleNamespace(id=3, name="Kunde")
+    rz = SimpleNamespace(id=8, name="RZ")
+    nb.ipam.vrfs.records += [
+        Record(nb.ipam.vrfs, id=60, name="Mgmt", tenant=rz, tenant_group=group),
+        Record(nb.ipam.vrfs, id=61, name="Fremd", tenant=SimpleNamespace(id=99), tenant_group=None),
+    ]
+    nb.ipam.prefixes.records.append(Record(nb.ipam.prefixes, id=70, prefix="10.10.167.0/24", vrf=SimpleNamespace(id=60)))
+    snapshot["interfaces"][0]["ip_addresses"] = ["10.10.167.5/24"]
+
+    plan = plan_switch_sync(nb, switch, snapshot)
+    assert plan["vrfs"] == [{"id": 60, "label": "Mgmt (RZ)"}], "group VRFs only"
+    assert plan["networks"][0] == {"network": "10.10.167.0/24", "vrf_id": 60, "vrf_name": "", "existing": [60],
+                                   "create": True, "stored": False}
+
+    switch["network_map"] = {"10.10.167.0/24": {"vrf_id": 60, "vrf_name": "", "create": False}}
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False)
+    assert report["errors"] == [] and report["prefixes_created"] == 0 and nb.ipam.vrfs.created == []
+    assert nb.ipam.ip_addresses.created[0]["vrf"] == 60
+    assert plan_switch_sync(nb, switch, snapshot)["networks"][0]["stored"] is True
+
+
+def test_legacy_network_choices_still_work_and_migrate(tmp_path):
+    nb, switch, snapshot = _numbered_setup()
+    snapshot["interfaces"][0]["ip_addresses"] = ["10.1.0.1/24"]
+    switch.update({"network_vrfs": {"10.1.0.0/24": ""}, "create_prefixes": ["10.1.0.0/24"]})
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False, dry_run=True)
+    assert report["prefixes_created"] == 1
+
+    from netbox_sync.core.config import ProfileStore
+    store = ProfileStore(tmp_path / "config.json")
+    store.save({"Kunde": {"name": "Kunde", "switches": [dict(switch, password="x")]}}, "Kunde")
+    loaded = store.load()[0]["Kunde"]
+    assert loaded["network_map"] == {"10.1.0.0/24": {"vrf_id": None, "vrf_name": "", "create": True}}
+    assert "network_vrfs" not in loaded["switches"][0]

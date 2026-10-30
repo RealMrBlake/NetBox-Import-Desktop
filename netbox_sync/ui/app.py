@@ -84,6 +84,7 @@ def main():
         hints.colorSchemeChanged.connect(lambda _scheme: theme.mode == "system" and theme.apply())
     install_excepthook(lambda: window)
     window.show()
+    window.updates.check_on_start()
     return app.exec()
 
 
