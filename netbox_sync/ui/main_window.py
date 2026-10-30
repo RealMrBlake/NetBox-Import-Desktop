@@ -28,6 +28,7 @@ from netbox_sync.ui.pages.connections import ConnectionsPage
 from netbox_sync.ui.pages.ipam import IpamPage
 from netbox_sync.ui.pages.log import LogPage
 from netbox_sync.ui.pages.overview import OverviewPage
+from netbox_sync.ui.pages.scanner import ScannerPage
 from netbox_sync.ui.pages.settings import SettingsPage
 from netbox_sync.ui.pages.switches import SwitchesPage
 from netbox_sync.ui.pages.vms import VMsPage
@@ -45,6 +46,7 @@ NAVIGATION = (
     ("switches", "Switche", "network"),
     ("clients", "Windows-Clients", "monitor"),
     ("ipam", "VRFs && Netze", "globe"),
+    ("scanner", "Netzwerk-Scanner", "search"),
     ("log", "Protokoll", "list"),
 )
 
@@ -104,7 +106,8 @@ class MainWindow(QMainWindow):
         self.toast_widget = Toast(central)
 
         for key, page_class in (("overview", OverviewPage), ("connections", ConnectionsPage), ("vms", VMsPage),
-                                ("switches", SwitchesPage), ("clients", ClientsPage), ("ipam", IpamPage), ("log", LogPage),
+                                ("switches", SwitchesPage), ("clients", ClientsPage), ("ipam", IpamPage), ("scanner", ScannerPage),
+                                ("log", LogPage),
                                 ("settings", SettingsPage)):
             page = page_class(self)
             self.pages[key] = page
@@ -272,6 +275,8 @@ class MainWindow(QMainWindow):
         elif page is self.pages["switches"] and not self.tasks.busy:
             page.discover()
         elif page is self.pages["clients"] and not self.tasks.busy:
+            page.scan()
+        elif page is self.pages["scanner"] and not self.tasks.busy:
             page.scan()
 
     def _focus_search(self):

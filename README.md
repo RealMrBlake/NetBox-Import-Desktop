@@ -21,7 +21,7 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
 - Light and dark theme (optionally following Windows)
 - Log with filter, search and export, plus a rotating log file under
   `%APPDATA%\NetBox VM Import\logs`
-- Keyboard shortcuts: `Ctrl+1…8` navigation, `F5` reload/read, `Ctrl+F` search
+- Keyboard shortcuts: `Ctrl+1…9` navigation, `F5` reload/read, `Ctrl+F` search
 - Updates from the Gitea releases: checked on start (can be switched off in the
   settings, or run on demand); after confirmation the installed version runs the
   new setup silently and the portable EXE replaces itself, then the application
@@ -85,6 +85,21 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
 - Cables from LLDP/CDP, also with FQDN system names or via the management IP
 - The switch configuration is only changed when "Enable LLDP if needed" is
   explicitly switched on
+
+### Network scanner (read only)
+
+- Scans IP ranges, networks and host names (`192.0.2.1-254`, `192.0.2.0/24`,
+  up to 4096 addresses) in parallel; "own network" fills in the networks of
+  this computer
+- Finds hosts by ping (Windows ICMP API, no administrator rights), ARP in the
+  local subnet and TCP ports – hosts that block ping are found as well
+- Shows name (reverse DNS and NetBIOS, with workgroup/domain), MAC address,
+  open services from a configurable port list and response time
+- Compares every address with NetBox automatically: NetBox object (device or VM)
+  and DNS name next to each IP, with the state "matches", "name differs", "not
+  in NetBox" or "in NetBox, not reachable"; nothing is written to NetBox
+- Filters for reachable hosts and deviations; double click or context menu opens
+  HTTP/HTTPS, Remote Desktop, file shares or the IP address in NetBox
 
 ### Windows clients (agentless via WMI/CIM over WinRM)
 

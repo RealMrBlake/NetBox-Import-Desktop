@@ -23,6 +23,8 @@ DEFAULT_SETTINGS = {
     "parallel_wmi": 8,            # concurrent WinRM sessions for client scans
     "auto_update_check": True,    # look for a newer Gitea release on start
     "skipped_version": "",        # release the user chose to skip
+    "scanner_targets": "",        # last IP ranges of the network scanner
+    "scanner_ports": "",          # empty = default port list
 }
 
 log = logging.getLogger(__name__)
