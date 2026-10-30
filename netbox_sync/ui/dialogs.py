@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from netbox_sync.core.config import known_hosts_path
-from netbox_sync.core.switches import MATCH_METHODS, PLATFORMS, forget_host_key
+from netbox_sync.core.switches import MATCH_METHODS, PLATFORMS, VLAN_METHODS, forget_host_key
 from netbox_sync.core.virtualization import test_source
 from netbox_sync.ui.icons import icon
 from netbox_sync.ui.models import Column, FilterProxy, RowTableModel
@@ -706,29 +706,52 @@ class SwitchMappingDialog(_Dialog):
             vlan_layout = QVBoxLayout(vlan_page)
             vlan_layout.setContentsMargins(0, 12, 0, 0)
             vlan_layout.addWidget(label(
-                "VLANs der Switch-Ports. Vorhandene VLANs des Mandanten werden den Schnittstellen zugeordnet "
-                "(802.1Q-Modus, untagged/tagged). Fehlende VLANs werden nur angelegt, wenn sie angehakt sind.",
+                "VLANs der Switch-Ports. Gesucht wird in der Mandantengruppe des Switches über die VLAN-ID; bei "
+                "mehreren Treffern entscheiden Mandant, Standort und Name. Zugeordnete VLANs werden an den "
+                "Schnittstellen gesetzt (802.1Q-Modus, untagged/tagged). Neue VLANs erhalten den eingetragenen "
+                "Namen und den gewählten Mandanten aus der Mandantengruppe (vorbelegt: Mandant des Switches).",
                 muted=True, wrap=True))
-            self.vlan_table = QTableWidget(0, 5)
-            self.vlan_table.setHorizontalHeaderLabels(["Switch", "Mandant", "VLAN", "Name (Switch)", "In NetBox"])
+            self.vlan_table = QTableWidget(0, 7)
+            self.vlan_table.setHorizontalHeaderLabels(["Switch", "VLAN", "Name (Switch)", "NetBox-VLAN",
+                                                       "Name des neuen VLANs", "Mandant (neu)", "Zuordnung"])
             for switch, plan, item in vlans:
                 row = self.vlan_table.rowCount()
                 self.vlan_table.insertRow(row)
-                for column, text in enumerate((switch["name"], plan["tenant"], str(item["vid"]), item["name"])):
+                for column, text in enumerate((switch["name"], str(item["vid"]), item["name"])):
                     self.vlan_table.setItem(row, column, QTableWidgetItem(text))
-                status = QTableWidgetItem(item["netbox_name"] or "fehlt – anlegen")
-                if item["netbox_name"]:
-                    status.setFlags(Qt.ItemIsEnabled)
-                else:
-                    status.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
-                    status.setCheckState(Qt.Checked if item["create"] else Qt.Unchecked)
-                    status.setForeground(QColor(theme.color("warning")))
-                self.vlan_table.setItem(row, 4, status)
-                self.vlan_rows.append((switch, item, status))
-            self._prepare_table(self.vlan_table, (140, 140, 70, 200, 200))
+                combo = QComboBox()
+                for candidate in item["candidates"]:
+                    combo.addItem(candidate["label"], candidate["id"])
+                combo.addItem("＋ neu anlegen", self.NEW)
+                combo.addItem("– nicht zuordnen –", 0)
+                current = item["netbox_id"] or (0 if item["method"] == "skip" else self.NEW)
+                combo.setCurrentIndex(max(0, combo.findData(current)))
+                name = QLineEdit(item["new_name"])
+                name.setMaxLength(64)
+                name.setPlaceholderText(item["name"])
+                method = QTableWidgetItem(VLAN_METHODS.get(item["method"], item["method"]))
+                if item["method"] in ("ambiguous", "new"):
+                    method.setForeground(QColor(theme.color("warning")))
+                tenant = QComboBox()
+                for option in plan["tenants"]:
+                    tenant.addItem(option["name"], option["id"])
+                tenant.setCurrentIndex(max(0, tenant.findData(item["new_tenant"])))
+                self.vlan_table.setCellWidget(row, 3, combo)
+                self.vlan_table.setCellWidget(row, 4, name)
+                self.vlan_table.setCellWidget(row, 5, tenant)
+                self.vlan_table.setItem(row, 6, method)
+
+                def toggle(_index=None, combo=combo, name=name, tenant=tenant):
+                    for widget in (name, tenant):
+                        widget.setEnabled(combo.currentData() == self.NEW)
+                combo.currentIndexChanged.connect(toggle)
+                toggle()
+                self.vlan_rows.append((switch, item, combo, name, tenant))
+            self._prepare_table(self.vlan_table, (130, 60, 150, 280, 200, 180, 110))
             vlan_layout.addWidget(self.vlan_table, 1)
-            missing = sum(1 for _switch, item, _status in self.vlan_rows if not item["netbox_name"])
-            tabs.addTab(vlan_page, f"VLANs ({missing} fehlen)")
+            missing = sum(1 for _switch, item, *_widgets in self.vlan_rows if item["method"] == "new")
+            unclear = sum(1 for _switch, item, *_widgets in self.vlan_rows if item["method"] == "ambiguous")
+            tabs.addTab(vlan_page, f"VLANs ({missing} fehlen" + (f", {unclear} mehrdeutig)" if unclear else ")"))
 
         self.root.addWidget(tabs, 1)
         self.root.addWidget(self.error_banner)
@@ -812,15 +835,24 @@ class SwitchMappingDialog(_Dialog):
             else:
                 stored[neighbor["local_port"]] = chosen
         for switch, plan in self.plans:
-            result[switch["id"]].update({"network_vrfs": {}, "create_prefixes": [], "create_vlans": []})
+            result[switch["id"]].update({"network_vrfs": {}, "create_prefixes": [], "create_vlans": [], "vlan_map": {}})
         for _row, switch, item, combo, status in self.network_rows:
             choices = result[switch["id"]]
             choices["network_vrfs"][item["network"]] = combo.currentData()
             if status.data(Qt.CheckStateRole) is not None and status.checkState() == Qt.Checked:
                 choices["create_prefixes"].append(item["network"])
-        for switch, item, status in self.vlan_rows:
-            if not item["netbox_name"] and status.checkState() == Qt.Checked:
-                result[switch["id"]]["create_vlans"].append(item["vid"])
+        for switch, item, combo, name, tenant in self.vlan_rows:
+            chosen = combo.currentData()
+            if chosen == self.NEW:
+                if not name.text().strip():
+                    self.show_error(f"{switch['name']}: Bitte einen Namen für das neue VLAN {item['vid']} eingeben.")
+                    return
+                choice = {"action": "new", "name": name.text().strip(), "tenant": tenant.currentData()}
+            elif chosen:
+                choice = {"action": "map", "id": chosen}
+            else:
+                choice = {"action": "skip"}
+            result[switch["id"]]["vlan_map"][str(item["vid"])] = choice
         self.result = result
         super().accept()
 

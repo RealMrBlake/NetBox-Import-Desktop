@@ -1068,14 +1068,103 @@ def snapshot_vlan_ids(snapshot):
     return sorted(vids)
 
 
-def _tenant_vlans(nb, tenant_id, site_id):
-    """``{VLAN ID: record}`` of the tenant; a VLAN of the switch's site wins."""
+VLAN_METHODS = {
+    "vid": "gleiche VID",
+    "name": "VID + Name",
+    "ambiguous": "mehrdeutig",
+    "manual": "manuell",
+    "new": "fehlt",
+    "skip": "nicht zuordnen",
+}
+
+
+def candidate_vlans(nb, tenant_id):
+    """VLANs of the switch's tenant group (or tenant) – a VLAN may belong to a
+    sibling tenant, e.g. a school network documented under its own tenant."""
+    tenant = nb.tenancy.tenants.get(tenant_id)
+    group_id = related_id(tenant, "group") if tenant else None
     found = {}
-    for vlan in nb.ipam.vlans.filter(tenant_id=tenant_id):
-        current = found.get(vlan.vid)
-        if current is None or (related_id(vlan, "site") == site_id and related_id(current, "site") != site_id):
-            found[vlan.vid] = vlan
-    return found
+    sources = [nb.ipam.vlans.filter(tenant_id=tenant_id)]
+    if group_id:
+        sources.append(nb.ipam.vlans.filter(tenant_group_id=group_id))
+    for source in sources:
+        for vlan in source:
+            found[vlan.id] = vlan
+    return list(found.values())
+
+
+def candidate_tenants(nb, tenant_id):
+    """Tenants a new VLAN may get: the tenant group of the switch's tenant."""
+    tenant = nb.tenancy.tenants.get(tenant_id)
+    group_id = related_id(tenant, "group") if tenant else None
+    tenants = {tenant_id: getattr(tenant, "name", None) or str(tenant_id)}
+    if group_id:
+        tenants.update({item.id: item.name for item in nb.tenancy.tenants.filter(group_id=group_id)})
+    return sorted(({"id": key, "name": value} for key, value in tenants.items()), key=lambda row: row["name"].casefold())
+
+
+def _name_tokens(text):
+    return set(re.findall(r"[a-z]+|\d+", (text or "").casefold()))
+
+
+def vlan_choice_label(vlan):
+    owner = getattr(getattr(vlan, "tenant", None), "name", None) or getattr(getattr(vlan, "group", None), "name", None)
+    return f"{vlan.vid} – {vlan.name}" + (f" ({owner})" if owner else "")
+
+
+def match_vlans(vids, names, vlans, tenant_id, site_id, manual=None):
+    """Assign NetBox VLANs to switch VLAN IDs.
+
+    Candidates need the same VID. With several, the own tenant, the switch's
+    site and similar names (``Server_LEO`` ↔ ``Leo Server``) decide.
+    ``manual`` is ``{str(vid): {"action": "map"|"new"|"skip", "id", "name"}}``.
+    Returns ``{vid: (record or None, method, name for a new VLAN)}``.
+    """
+    manual = manual or {}
+    by_vid, by_id = {}, {vlan.id: vlan for vlan in vlans}
+    for vlan in vlans:
+        by_vid.setdefault(vlan.vid, []).append(vlan)
+    result = {}
+    for vid in vids:
+        switch_name = names.get(vid) or f"VLAN{vid}"
+        choice = manual.get(str(vid)) or {}
+        if choice.get("action") == "new":
+            name = (choice.get("name") or switch_name)[:64]
+            # Created by an earlier run – use it instead of creating it again.
+            created = next((vlan for vlan in by_vid.get(vid, []) if vlan.name.casefold() == name.casefold()), None)
+            result[vid] = (created, "manual", name) if created else (None, "new", name)
+            continue
+        if choice.get("action") == "skip":
+            result[vid] = (None, "skip", switch_name)
+            continue
+        if choice.get("action") == "map" and choice.get("id") in by_id:
+            result[vid] = (by_id[choice["id"]], "manual", switch_name)
+            continue
+        candidates = by_vid.get(vid, [])
+        if not candidates:
+            result[vid] = (None, "new", switch_name)
+            continue
+        tokens = _name_tokens(switch_name)
+
+        def score(vlan):
+            other = _name_tokens(vlan.name)
+            similarity = len(tokens & other) / len(tokens | other) if tokens | other else 0
+            return ((related_id(vlan, "tenant") == tenant_id) * 4 + (related_id(vlan, "site") == site_id) * 2
+                    + similarity * 3)
+
+        ranked = sorted(candidates, key=score, reverse=True)
+        if len(ranked) == 1:
+            method = "vid"
+        else:
+            method = "name" if score(ranked[0]) > score(ranked[1]) else "ambiguous"
+        result[vid] = (ranked[0], method, switch_name)
+    return result
+
+
+def _switch_vlan_matches(nb, config, snapshot, tenant_id, site_id):
+    names = {int(key): value for key, value in (snapshot.get("vlan_names") or {}).items()}
+    vlans = candidate_vlans(nb, tenant_id)
+    return vlans, match_vlans(snapshot_vlan_ids(snapshot), names, vlans, tenant_id, site_id, config.get("vlan_map"))
 
 
 def plan_switch_sync(nb, config, snapshot):
@@ -1127,12 +1216,21 @@ def plan_switch_sync(nb, config, snapshot):
                          "create": create_prefixes is None or network in create_prefixes})
 
     names = {int(key): value for key, value in (snapshot.get("vlan_names") or {}).items()}
-    present = _tenant_vlans(nb, tenant_id, related_id(device, "site"))
-    create_vlans = config.get("create_vlans")
-    vlans = [{"vid": vid, "name": names.get(vid) or f"VLAN{vid}",
-              "netbox_name": present[vid].name if vid in present else None,
-              "create": create_vlans is None or vid in create_vlans}
-             for vid in snapshot_vlan_ids(snapshot)]
+    candidates, vlan_matches = _switch_vlan_matches(nb, config, snapshot, tenant_id, related_id(device, "site"))
+    tenants = candidate_tenants(nb, tenant_id)
+    allowed = {row["id"] for row in tenants}
+    vlan_map = config.get("vlan_map") or {}
+    vlans = []
+    for vid, (record, method, new_name) in vlan_matches.items():
+        new_tenant = (vlan_map.get(str(vid)) or {}).get("tenant")
+        vlans.append({
+            "vid": vid, "name": names.get(vid) or f"VLAN{vid}", "method": method, "new_name": new_name,
+            "new_tenant": new_tenant if new_tenant in allowed else tenant_id,
+            "netbox_id": record.id if record else None,
+            "candidates": [{"id": vlan.id, "label": vlan_choice_label(vlan)}
+                           for vlan in sorted(candidates, key=lambda item: (item.name or "").casefold())
+                           if vlan.vid == vid],
+        })
     return {
         "error": None,
         "device": {"id": device.id, "name": device.name},
@@ -1150,6 +1248,7 @@ def plan_switch_sync(nb, config, snapshot):
         "vrfs": vrfs,
         "networks": networks,
         "vlans": vlans,
+        "tenants": tenants,
     }
 
 
@@ -1242,17 +1341,22 @@ def _sync_prefixes(nb, config, snapshot, tenant_id, vrf_ids, dry_run, report):
 
 def _sync_vlans(nb, config, snapshot, tenant_id, site_id, dry_run, report):
     """``{VLAN ID: NetBox ID}``; missing VLANs are only created when approved."""
-    present = {vid: vlan.id for vid, vlan in _tenant_vlans(nb, tenant_id, site_id).items()}
-    approved = {int(vid) for vid in config.get("create_vlans") or []}
-    names = {int(key): value for key, value in (snapshot.get("vlan_names") or {}).items()}
-    for vid in snapshot_vlan_ids(snapshot):
-        if vid in present or vid not in approved:
+    _vlans, matches = _switch_vlan_matches(nb, config, snapshot, tenant_id, site_id)
+    approved = {int(vid) for vid, choice in (config.get("vlan_map") or {}).items() if choice.get("action") == "new"}
+    approved |= {int(vid) for vid in config.get("create_vlans") or []}  # profiles of version 4.4.0
+    present = {}
+    for vid, (record, method, name) in matches.items():
+        if record is not None:
+            present[vid] = record.id
             continue
-        name = (names.get(vid) or f"VLAN{vid}")[:64]
+        if method != "new" or vid not in approved:
+            continue
         try:
             report["vlans_created"] += 1
             report["changes"].append(f"VLAN {vid} „{name}“ neu")
-            payload = {"vid": vid, "name": name, "status": "active", "tenant": tenant_id}
+            # A different tenant may be chosen per VLAN in the review dialog.
+            chosen_tenant = ((config.get("vlan_map") or {}).get(str(vid)) or {}).get("tenant") or tenant_id
+            payload = {"vid": vid, "name": name[:64], "status": "active", "tenant": chosen_tenant}
             if site_id:
                 payload["site"] = site_id
             present[vid] = _NEW if dry_run else nb.ipam.vlans.create(payload).id

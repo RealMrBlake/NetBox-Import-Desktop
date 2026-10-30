@@ -134,8 +134,8 @@ def test_missing_vlans_prefixes_and_vrfs_are_only_created_when_approved():
     snapshot["vlan_names"] = {20: "Clients"}
 
     plan = plan_switch_sync(nb, switch, snapshot)
-    assert [(item["vid"], item["netbox_name"], item["name"]) for item in plan["vlans"]] == [
-        (1, None, "VLAN1"), (10, "Server", "VLAN10"), (20, None, "Clients")]
+    assert [(item["vid"], item["netbox_id"], item["method"], item["new_name"]) for item in plan["vlans"]] == [
+        (1, None, "new", "VLAN1"), (10, 110, "vid", "VLAN10"), (20, None, "new", "Clients")]
     assert plan["networks"] == [{"network": "10.1.0.0/24", "vrf": "", "existing_vrfs": [], "create": True}]
 
     # Not approved: nothing is created, only the existing VLAN 10 is assigned.
@@ -146,7 +146,7 @@ def test_missing_vlans_prefixes_and_vrfs_are_only_created_when_approved():
     assert nb.dcim.interfaces.get(1).untagged_vlan == 110 and nb.dcim.interfaces.get(1).mode == "access"
     assert nb.ipam.ip_addresses.created[0]["tenant"] == 7 and nb.ipam.ip_addresses.created[0]["vrf"] is None
 
-    switch.update({"create_vlans": [20], "create_prefixes": ["10.1.0.0/24"],
+    switch.update({"vlan_map": {"20": {"action": "new", "name": "Clients"}}, "create_prefixes": ["10.1.0.0/24"],
                    "network_vrfs": {"10.1.0.0/24": "Kunde-Mgmt"}})
     report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False)
     assert report["errors"] == []
@@ -170,3 +170,46 @@ def test_vlan_names_are_parsed():
     from netbox_sync.core.switches import parse_vlan_names
     assert parse_vlan_names('vlan 10\n   name "Server"\n   exit\nvlan 20\n name Clients\n#\n') == {
         10: "Server", 20: "Clients"}
+
+
+def test_vlans_of_sibling_tenants_are_matched_by_vid_and_name():
+    nb, switch, snapshot = _numbered_setup()
+    group = SimpleNamespace(id=3, name="Kunde")
+    leo = SimpleNamespace(id=8, name="Leo")
+    nb.ipam.vlans.records += [
+        Record(nb.ipam.vlans, id=201, vid=2, name="Leo Server", tenant=leo, tenant_group=group),
+        Record(nb.ipam.vlans, id=202, vid=2, name="Gast", tenant=SimpleNamespace(id=9), tenant_group=group),
+        Record(nb.ipam.vlans, id=230, vid=30, name="Fremd", tenant=SimpleNamespace(id=99), tenant_group=None),
+    ]
+    snapshot["interfaces"][0]["vlans"] = {"untagged": [2], "tagged": [], "tagged_all": False}
+    snapshot["vlan_names"] = {2: "Server_LEO", 30: "Drucker"}
+    plan = plan_switch_sync(nb, switch, snapshot)
+    by_vid = {item["vid"]: item for item in plan["vlans"]}
+    assert (by_vid[2]["netbox_id"], by_vid[2]["method"]) == (201, "name")
+    assert [candidate["id"] for candidate in by_vid[2]["candidates"]] == [202, 201]
+    assert by_vid[30]["method"] == "new", "VLANs outside the tenant group are never used"
+
+    switch["vlan_map"] = {"30": {"action": "new", "name": "Drucker-Netz"}, "20": {"action": "skip"}}
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False)
+    assert report["errors"] == []
+    assert nb.ipam.vlans.created == [{"vid": 30, "name": "Drucker-Netz", "status": "active", "tenant": 7}]
+    assert nb.dcim.interfaces.get(1).untagged_vlan == 201
+    assert getattr(nb.dcim.interfaces.get(2), "mode", None) is None, "skipped VLAN leaves the port alone"
+
+
+def test_new_vlan_can_get_another_tenant_of_the_group():
+    nb, switch, snapshot = _numbered_setup()
+    group = SimpleNamespace(id=3, name="Kunde")
+    nb.tenancy.tenants.records.append(Record(nb.tenancy.tenants, id=8, name="Leo", group=group))
+    nb.tenancy.tenants.records.append(Record(nb.tenancy.tenants, id=9, name="Fremd", group=None))
+    plan = plan_switch_sync(nb, switch, snapshot)
+    assert [row["name"] for row in plan["tenants"]] == ["Leo", "Muster"]
+    assert {item["new_tenant"] for item in plan["vlans"]} == {7}
+
+    switch["vlan_map"] = {"10": {"action": "new", "name": "Leo Server", "tenant": 8}}
+    sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False)
+    assert nb.ipam.vlans.created == [{"vid": 10, "name": "Leo Server", "status": "active", "tenant": 8}]
+    # NetBox resolves the tenant group through the tenant; the fake needs it set.
+    nb.ipam.vlans.records[-1].tenant_group = group
+    again = plan_switch_sync(nb, switch, snapshot)["vlans"][0]
+    assert (again["netbox_id"], again["method"]) == (nb.ipam.vlans.records[-1].id, "manual"), "never created twice"

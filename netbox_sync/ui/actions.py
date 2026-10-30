@@ -429,7 +429,7 @@ class Actions:
             needs_review = any(
                 any(entry["method"] not in ("name", "new") or (entry["method"] == "new" and entry["physical"])
                     for entry in item["interfaces"]) or (create_cables and item["neighbors"])
-                or item["networks"] or any(not vlan["netbox_name"] for vlan in item["vlans"])
+                or item["networks"] or any(vlan["method"] != "vid" for vlan in item["vlans"])
                 for _switch, item in reviewable)
 
             def ask():

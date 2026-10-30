@@ -63,9 +63,13 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
   LLDP/CDP neighbour can be corrected; a neighbour can be assigned manually to
   any device of the switch's tenant group. Choices are stored in the profile
 - Networks and VLANs in the same review: per network the VRF (global, a tenant
-  VRF or a new one) and whether a missing prefix is created; missing VLANs
-  (named from the switch configuration) are only created when ticked. Existing
-  VLANs are assigned to the ports (802.1Q mode, untagged/tagged)
+  VRF or a new one) and whether a missing prefix is created
+- VLAN mapping: switch VLANs are matched to NetBox VLANs of the switch's tenant
+  group by VID (own tenant, site and similar names decide between several);
+  each VLAN can be mapped manually, skipped or created with a name and a tenant
+  of the tenant group of your choice (pre-filled from the switch configuration
+  and the switch's tenant). Mapped VLANs are assigned
+  to the ports (802.1Q mode, untagged/tagged)
 - Tenant required: a switch without tenant in NetBox is refused; every created
   IP address, prefix, VRF, VLAN and cable gets the switch's tenant
 - Cables from LLDP/CDP, also with FQDN system names or via the management IP
