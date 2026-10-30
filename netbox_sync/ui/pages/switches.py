@@ -4,7 +4,7 @@ import uuid
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QMenu, QSplitter, QStackedWidget
 
-from netbox_sync.core.switches import PLATFORMS, vlan_label
+from netbox_sync.core.switches import PLATFORMS, ignored_vlans, vlan_label, without_vlans
 from netbox_sync.ui import widgets
 from netbox_sync.ui.dialogs import AddSwitchesDialog, RawDataDialog, SwitchDialog
 from netbox_sync.ui.icons import icon
@@ -108,7 +108,8 @@ class SwitchesPage(Page):
                    dot=lambda row: "success" if row["connected"] else ("text_faint" if row["enabled"] else "danger")),
             Column("speed", "Geschwindigkeit", 115, value=lambda row: _speed(row.get("speed_mbps")),
                    sort=lambda row: row.get("speed_mbps") or 0),
-            Column("vlans", "VLANs", 110, value=lambda row: vlan_label(row.get("vlans"))),
+            Column("vlans", "VLANs", 110, value=lambda row: vlan_label(without_vlans(
+                row.get("vlans"), ignored_vlans((self.state.profile or {}).get("vlan_map"))))),
             Column("ips", "IP-Adressen", 160, value=lambda row: ", ".join(row.get("ip_addresses", []))),
             Column("neighbor", "Nachbar", 170, value=lambda row: (row.get("neighbor") or {}).get("system_name", "")),
             Column("remote_port", "Nachbar-Port", 110, value=lambda row: (row.get("neighbor") or {}).get("remote_port", "")),

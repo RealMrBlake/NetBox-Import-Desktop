@@ -213,3 +213,32 @@ def test_new_vlan_can_get_another_tenant_of_the_group():
     nb.ipam.vlans.records[-1].tenant_group = group
     again = plan_switch_sync(nb, switch, snapshot)["vlans"][0]
     assert (again["netbox_id"], again["method"]) == (nb.ipam.vlans.records[-1].id, "manual"), "never created twice"
+
+
+def test_ignored_vlans_are_left_out_everywhere():
+    nb, switch, snapshot = _numbered_setup()
+    nb.ipam.vlans.records.append(Record(nb.ipam.vlans, id=110, vid=10, name="Server", tenant=SimpleNamespace(id=7)))
+    snapshot["interfaces"][0]["vlans"] = {"untagged": [10], "tagged": [20, 30], "tagged_all": False}
+    switch["vlan_map"] = {"20": {"action": "ignore"}, "30": {"action": "new", "name": "Drucker"}}
+    plan = plan_switch_sync(nb, switch, snapshot)
+    by_vid = {item["vid"]: item for item in plan["vlans"]}
+    assert (by_vid[20]["method"], by_vid[20]["stored"]) == ("ignore", True)
+    assert by_vid[10]["stored"] is False
+    assert {item["name"]: item["vlan_label"] for item in plan["interfaces"]}["1/1/1"] == "10,30"
+
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False)
+    assert report["errors"] == []
+    assert [payload["vid"] for payload in nb.ipam.vlans.created] == [30]
+    port = nb.dcim.interfaces.get(1)
+    assert port.label == "10,30" and port.tagged_vlans == [nb.ipam.vlans.records[-1].id]
+
+
+def test_vlan_decisions_move_from_switches_to_the_profile(tmp_path):
+    from netbox_sync.core.config import ProfileStore
+    store = ProfileStore(tmp_path / "config.json")
+    profile = {"name": "Kunde", "switches": [{"id": "s", "name": "sw", "password": "x",
+                                              "vlan_map": {"5": {"action": "ignore"}}, "create_vlans": [6]}]}
+    store.save({"Kunde": profile}, "Kunde")
+    loaded = store.load()[0]["Kunde"]
+    assert loaded["vlan_map"] == {"5": {"action": "ignore"}}
+    assert "vlan_map" not in loaded["switches"][0] and "create_vlans" not in loaded["switches"][0]

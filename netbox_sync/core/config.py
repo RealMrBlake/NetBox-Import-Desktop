@@ -116,6 +116,8 @@ def empty_profile(name):
         # Remembered assignment "<source id>:<hypervisor cluster>" -> NetBox cluster name.
         "cluster_map": {},
         "host_map": {},
+        # Switch VLAN decisions for all switches: "<vid>" -> {"action": "map"|"new"|"skip"|"ignore", ...}.
+        "vlan_map": {},
         # Windows client scan: targets and options, never a password.
         "clients": dict(DEFAULT_CLIENT_OPTIONS),
     }
@@ -164,6 +166,7 @@ class ProfileStore:
                 "netbox_ignore_ssl": bool(record.get("netbox_ignore_ssl", record.get("ignore_ssl_errors", False))),
                 "cluster_map": dict(record.get("cluster_map", {})),
                 "host_map": dict(record.get("host_map", {})),
+                "vlan_map": dict(record.get("vlan_map", {})),
                 "clients": {**DEFAULT_CLIENT_OPTIONS, **{key: value for key, value in record.get("clients", {}).items()
                                                          if key in DEFAULT_CLIENT_OPTIONS}},
             })
@@ -171,6 +174,11 @@ class ProfileStore:
                 profile["sources"].append(self._decrypt_record(source, f"{name}: {source.get('name', 'Quelle')}"))
             for switch in record.get("switches", []):
                 profile["switches"].append(self._decrypt_record(switch, f"{name}: {switch.get('name', 'Switch')}"))
+            # Migration from 4.5: VLAN decisions were stored per switch.
+            for switch in profile["switches"]:
+                for vid, choice in (switch.pop("vlan_map", None) or {}).items():
+                    profile["vlan_map"].setdefault(vid, choice)
+                switch.pop("create_vlans", None)
 
             # Migration from v2: one VMware source embedded in each profile.
             if not profile["sources"] and record.get("esxi_host"):
@@ -228,6 +236,7 @@ class ProfileStore:
                 "switches": [self._encrypt_record(switch) for switch in profile.get("switches", [])],
                 "cluster_map": dict(profile.get("cluster_map", {})),
                 "host_map": dict(profile.get("host_map", {})),
+                "vlan_map": dict(profile.get("vlan_map", {})),
                 "clients": dict(profile.get("clients", DEFAULT_CLIENT_OPTIONS)),
             })
 

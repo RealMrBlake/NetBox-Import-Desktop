@@ -1075,7 +1075,21 @@ VLAN_METHODS = {
     "manual": "manuell",
     "new": "fehlt",
     "skip": "nicht zuordnen",
+    "ignore": "ignoriert",
 }
+
+
+def ignored_vlans(vlan_map):
+    """VLAN IDs the user chose to ignore on all switches of the profile."""
+    return {int(vid) for vid, choice in (vlan_map or {}).items() if (choice or {}).get("action") == "ignore"}
+
+
+def without_vlans(vlans, ignored):
+    """Port VLAN membership without ignored VLANs (``None`` stays ``None``)."""
+    if not vlans or not ignored:
+        return vlans
+    return dict(vlans, untagged=[vid for vid in vlans.get("untagged", []) if vid not in ignored],
+                tagged=[vid for vid in vlans.get("tagged", []) if vid not in ignored])
 
 
 def candidate_vlans(nb, tenant_id):
@@ -1134,8 +1148,8 @@ def match_vlans(vids, names, vlans, tenant_id, site_id, manual=None):
             created = next((vlan for vlan in by_vid.get(vid, []) if vlan.name.casefold() == name.casefold()), None)
             result[vid] = (created, "manual", name) if created else (None, "new", name)
             continue
-        if choice.get("action") == "skip":
-            result[vid] = (None, "skip", switch_name)
+        if choice.get("action") in ("skip", "ignore"):
+            result[vid] = (None, choice["action"], switch_name)
             continue
         if choice.get("action") == "map" and choice.get("id") in by_id:
             result[vid] = (by_id[choice["id"]], "manual", switch_name)
@@ -1225,6 +1239,7 @@ def plan_switch_sync(nb, config, snapshot):
         new_tenant = (vlan_map.get(str(vid)) or {}).get("tenant")
         vlans.append({
             "vid": vid, "name": names.get(vid) or f"VLAN{vid}", "method": method, "new_name": new_name,
+            "stored": str(vid) in vlan_map,
             "new_tenant": new_tenant if new_tenant in allowed else tenant_id,
             "netbox_id": record.id if record else None,
             "candidates": [{"id": vlan.id, "label": vlan_choice_label(vlan)}
@@ -1236,7 +1251,8 @@ def plan_switch_sync(nb, config, snapshot):
         "device": {"id": device.id, "name": device.name},
         "interfaces": [
             {"name": item["name"], "netbox_name": record.name if record else "", "method": method,
-             "physical": _physical_interface(item), "vlan_label": vlan_label(item.get("vlans"))}
+             "physical": _physical_interface(item),
+             "vlan_label": vlan_label(without_vlans(item.get("vlans"), ignored_vlans(vlan_map)))}
             for item in snapshot["interfaces"]
             for record, method in [matches[item["name"]]]
         ],
@@ -1425,6 +1441,7 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
     vrf_ids = _sync_vrfs(nb, config, snapshot, tenant_id, dry_run, report)
     _sync_prefixes(nb, config, snapshot, tenant_id, vrf_ids, dry_run, report)
     vlan_ids = _sync_vlans(nb, config, snapshot, tenant_id, related_id(device, "site"), dry_run, report)
+    ignored = ignored_vlans(config.get("vlan_map"))
     matches = match_interfaces(snapshot["interfaces"], list(nb.dcim.interfaces.filter(device_id=device_id)),
                                config.get("interface_map"))
     records = {}
@@ -1432,7 +1449,8 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
     for interface in snapshot["interfaces"]:
         key = interface_key(interface["name"])
         record, method = matches[interface["name"]]
-        label = vlan_label(interface.get("vlans"))
+        port = dict(interface, vlans=without_vlans(interface.get("vlans"), ignored))
+        label = vlan_label(port["vlans"])
         try:
             if record:
                 changes = {}
@@ -1442,7 +1460,7 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
                 # routed ports and snapshots without configuration.
                 if label and (getattr(record, "label", "") or "") != label:
                     changes["label"] = label
-                changes.update(_vlan_assignment(interface, vlan_ids, record))
+                changes.update(_vlan_assignment(port, vlan_ids, record))
                 if changes:
                     report["interfaces_updated"] += 1
                     texts = []
@@ -1467,7 +1485,7 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
                 }
                 if label:
                     payload["label"] = label
-                payload.update(_vlan_assignment(interface, vlan_ids))
+                payload.update(_vlan_assignment(port, vlan_ids))
                 if interface.get("description"):
                     payload["description"] = interface["description"][:200]
                 report["interfaces_created"] += 1

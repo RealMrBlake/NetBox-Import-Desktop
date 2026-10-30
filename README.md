@@ -68,7 +68,11 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
   group by VID (own tenant, site and similar names decide between several);
   each VLAN can be mapped manually, skipped or created with a name and a tenant
   of the tenant group of your choice (pre-filled from the switch configuration
-  and the switch's tenant). Mapped VLANs are assigned
+  and the switch's tenant). VLANs can also be **ignored** on all switches –
+  they are neither created nor assigned and are left out of the labels. VLAN
+  decisions are stored per profile (shared by all its switches); only VLANs
+  that still need a decision are shown, stored and unambiguous ones are in a
+  collapsed section that can be expanded for editing. Mapped VLANs are assigned
   to the ports (802.1Q mode, untagged/tagged)
 - Tenant required: a switch without tenant in NetBox is refused; every created
   IP address, prefix, VRF, VLAN and cable gets the switch's tenant
