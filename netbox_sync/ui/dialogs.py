@@ -1,5 +1,6 @@
 """Modal dialogs for editing connections and reviewing changes."""
 
+import re
 import uuid
 
 from PySide6.QtCore import QThreadPool, Qt
@@ -368,7 +369,9 @@ class AddSwitchesDialog(_Dialog):
                          width=980)
         self.resize(1080, 720)
         self.result = []
-        self.rows = [dict(device, added=device["id"] in existing_device_ids) for device in devices]
+        self.rows = [dict(device, added=device.get("stack_master", device["id"]) in existing_device_ids)
+                     for device in devices]
+        self.by_id = {row["id"]: row for row in self.rows}
 
         filters = QHBoxLayout()
         filters.setSpacing(8)
@@ -402,8 +405,8 @@ class AddSwitchesDialog(_Dialog):
             Column("host", "SSH-Host", 130),
             Column("platform", "Plattform", 160, value=lambda row: PLATFORMS[row["platform"]],
                    color=lambda row: "text_faint" if row["platform"] == "auto" else None),
-            Column("added", "", 110, value=lambda row: "bereits im Profil" if row["added"] else "",
-                   color=lambda row: "text_faint"),
+            Column("added", "", 170, value=lambda row: "bereits im Profil" if row["added"] else (
+                f"Stack von {row['stack_of']}" if row.get("stack_of") else ""), color=lambda row: "text_faint"),
         ]
         self.model = RowTableModel(columns, checkable=True, row_id=lambda row: row["id"])
         self.model.set_rows(self.rows)
@@ -491,6 +494,16 @@ class AddSwitchesDialog(_Dialog):
             self.show_error("Bitte Benutzer und Passwort für den SSH-Zugang angeben.")
             return
         platform = self.platform.currentData()
+        # a stack is read once through its master; every member is mapped in the review
+        masters = {}
+        for row in chosen:
+            master = self.by_id.get(row.get("stack_master"), row)
+            if not master["added"]:
+                masters.setdefault(master["id"], master)
+        chosen = list(masters.values())
+        if not chosen:
+            self.show_error("Die ausgewählten Stack-Mitglieder sind über ihren Stack bereits im Profil.")
+            return
         self.result = [{
             "id": uuid.uuid4().hex,
             "name": row["name"],
@@ -564,8 +577,21 @@ class SyncPreviewDialog(_Dialog):
                 child = QTreeWidgetItem([note])
                 child.setIcon(0, icon("info", theme.color("warning")))
                 top.addChild(child)
+            members = {}
             for change in changes[:2000]:
-                top.addChild(QTreeWidgetItem([change]))
+                # stack member ports read "Interface X (Y) auf <member>: …" – group them under the member
+                found = re.match(r"(Interface .+?) auf ([^:]+): (.*)$", change)
+                if not found:
+                    top.addChild(QTreeWidgetItem([change]))
+                    continue
+                if found.group(2) not in members:
+                    members[found.group(2)] = QTreeWidgetItem([found.group(2)])
+                    members[found.group(2)].setIcon(0, icon("network", theme.color("text_muted")))
+                members[found.group(2)].addChild(QTreeWidgetItem([f"{found.group(1)}: {found.group(3)}"]))
+            for member in members.values():
+                member.setText(0, f"{member.text(0)} — {member.childCount()} Änderung(en)")
+                top.addChild(member)
+                member.setExpanded(True)
             tree.addTopLevelItem(top)
             top.setExpanded(len(reports) == 1 or bool(report["errors"]))
         self.root.addWidget(tree, 1)

@@ -12,7 +12,7 @@ from netbox_sync.core import exchange, netbox
 from netbox_sync.core.client_sync import ClientSyncEngine
 from netbox_sync.core.clients import ClientScanError, expand_targets, new_row, query_ad, scan_clients
 from netbox_sync.core.config import known_hosts_path
-from netbox_sync.core.netbox import NetBoxError, related_name
+from netbox_sync.core.netbox import NetBoxError, related_id, related_name
 from netbox_sync.core.switches import (
     PLATFORMS,
     describe_snapshot,
@@ -42,8 +42,13 @@ def _device_row(device):
     tenant = related_name(device, "tenant")
     role = related_name(device, "role") or related_name(device, "device_role")
     name = str(device.name)
+    chassis = getattr(device, "virtual_chassis", None)
     return {
         "id": device.id,
+        "chassis": related_id(device, "virtual_chassis"),
+        "chassis_master": related_id(chassis, "master") if chassis is not None else None,
+        "vc_position": getattr(device, "vc_position", None),
+        "stack_of": "",
         "name": name,
         "site": site,
         "tenant": tenant,
@@ -54,6 +59,23 @@ def _device_row(device):
         "platform": suggest_platform(platform, manufacturer, model),
         "label": " · ".join(part for part in (name, site, tenant) if part),
     }
+
+
+def _merge_stacks(rows):
+    """Stack members are read through one SSH session: point them at the chassis master and its address."""
+    chassis = {}
+    for row in rows:
+        if row["chassis"]:
+            chassis.setdefault(row["chassis"], []).append(row)
+    for members in chassis.values():
+        master = next((row for row in members if row["id"] == row["chassis_master"]), None)
+        master = master or min(members, key=lambda row: (not row["host"], row["vc_position"] or 0, row["name"]))
+        host = master["host"] or next((row["host"] for row in members if row["host"]), "")
+        master["host"] = host
+        for row in members:
+            if row is not master:
+                row.update(host=host, stack_of=master["name"], stack_master=master["id"])
+    return rows
 
 
 class Actions:
@@ -319,7 +341,7 @@ class Actions:
             nb = connect(ctx)
             ctx.log("Lade NetBox-Geräte …")
             devices = list(nb.dcim.devices.all())
-            rows = [_device_row(device) for device in devices if getattr(device, "name", None)]
+            rows = _merge_stacks([_device_row(device) for device in devices if getattr(device, "name", None)])
             skipped = len(devices) - len(rows)
             ctx.log(f"{len(rows)} Geräte geladen" + (f" ({skipped} ohne Namen übersprungen)" if skipped else ""),
                     "success")
@@ -367,8 +389,13 @@ class Actions:
                             ctx.log(f"{switch['name']}: keine Schnittstellen erkannt – bitte SSH-Rohdaten prüfen",
                                     "warning")
                     except Exception as error:  # noqa: BLE001
-                        failures[switch["id"]] = str(error)
-                        ctx.log(f"{switch['name']}: {error}", "error")
+                        problem = str(error)
+                        if "getaddrinfo" in problem:
+                            problem = (f"Host „{switch['host']}“ ist nicht auflösbar (keine Primär-IP in NetBox?). "
+                                       "Stack-Mitglieder werden über den Stack-Master ausgelesen und können aus "
+                                       "dem Profil entfernt werden.")
+                        failures[switch["id"]] = problem
+                        ctx.log(f"{switch['name']}: {problem}", "error")
                     ctx.progress(done, len(switches), switch["name"])
                     if ctx.cancelled:
                         for pending in futures:
