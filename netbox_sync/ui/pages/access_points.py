@@ -35,54 +35,70 @@ STATE_DOT = {"new": "accent", "known": "success", "check": "warning", "netbox_on
 ROLE_HINTS = ("access point", "accesspoint", "access-point", "wlan", "wifi", "ap")
 
 
-class SiteMappingDialog(_Dialog):
-    """Assign NetBox sites to Sophos sites and to APs without a Sophos site."""
+def placement_value(value):
+    """Stored choice as ``{"site": ID or None, "tenant": ID or None}`` (4.9.0 stored only a site ID)."""
+    if isinstance(value, dict):
+        return {"site": value.get("site") or None, "tenant": value.get("tenant") or None}
+    return {"site": value or None, "tenant": None}
 
-    def __init__(self, parent, hints, homeless, sites, site_map, ap_sites):
-        super().__init__(parent, "Standorte zuordnen",
-                         "Neue Access Points werden am zugeordneten NetBox-Standort angelegt und erhalten dessen "
-                         "Mandanten. Zur Auswahl stehen die Standorte der Mandantengruppe.", width=760)
-        self.resize(860, 620)
-        items = [("– nicht zugeordnet –", 0)] + [
-            (f"{site['name']}" + (f" ({site['tenant']})" if site["tenant"] else ""), site["id"]) for site in sites]
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Sophos-Standort / Access Point", "APs", "NetBox-Standort"])
+
+class SiteMappingDialog(_Dialog):
+    """Assign an optional NetBox site and the mandatory tenant to Sophos sites
+    and to APs without a Sophos site."""
+
+    def __init__(self, parent, rows, sites, tenants, default_tenant):
+        super().__init__(parent, "Standorte & Mandanten zuordnen",
+                         "Der Standort ist optional – APs ohne Zuordnung kommen an den Standard-Standort, weil NetBox "
+                         "für jedes Gerät einen Standort verlangt. Der Mandant ist Pflicht; vorgeschlagen wird der des "
+                         "Standorts, sonst der gewählte Mandant.", width=860)
+        self.resize(980, 620)
+        self.sites = {site["id"]: site for site in sites}
+        site_items = [("– kein Standort (Standard-Standort) –", 0)] + [
+            (site["name"] + (f" ({site['tenant']})" if site["tenant"] else ""), site["id"]) for site in sites]
+        tenant_items = [(tenant["name"], tenant["id"]) for tenant in tenants]
+        self.default_tenant = default_tenant
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Sophos-Standort / Access Point", "APs", "NetBox-Standort (optional)",
+                                              "Mandant *"])
         self.rows = []
-        for hint, count, suggestion in hints:
-            self._row(hint, str(count), items, site_map.get(hint) or suggestion or 0, ("site", hint))
-        for ap in homeless:
-            self._row(f"{ap['name']} (ohne Sophos-Standort)", "1", items, ap_sites.get(ap_key(ap)) or 0,
-                      ("ap", ap_key(ap)))
+        for text, count, key, current in rows:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(text))
+            self.table.setItem(row, 1, QTableWidgetItem(str(count)))
+            site = SearchableComboBox("Standort suchen …")
+            site.set_items(site_items, current["site"] or 0)
+            tenant = SearchableComboBox("Mandant wählen …")
+            tenant.set_items(tenant_items, current["tenant"] or self._site_tenant(current["site"]))
+            site.activated.connect(lambda _index, site=site, tenant=tenant: tenant.select_data(
+                self._site_tenant(site.valid_data())))
+            self.table.setCellWidget(row, 2, site)
+            self.table.setCellWidget(row, 3, tenant)
+            self.rows.append((key, site, tenant))
         self.table.verticalHeader().hide()
         self.table.verticalHeader().setDefaultSectionSize(42)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionMode(QTableWidget.NoSelection)
         self.table.horizontalHeader().setStretchLastSection(True)
-        for column, width in enumerate((330, 50, 360)):
+        for column, width in enumerate((300, 50, 330, 240)):
             self.table.setColumnWidth(column, width)
         self.root.addWidget(self.table, 1)
+        self.root.addWidget(self.error_banner)
         buttons, _ok = form_dialog_buttons(self, "Übernehmen")
         self.root.addWidget(buttons)
-        self.site_map, self.ap_sites = dict(site_map), dict(ap_sites)
+        self.result = {}
 
-    def _row(self, text, count, items, current, key):
-        row = self.table.rowCount()
-        self.table.insertRow(row)
-        self.table.setItem(row, 0, QTableWidgetItem(text))
-        self.table.setItem(row, 1, QTableWidgetItem(count))
-        combo = SearchableComboBox("Standort suchen …")
-        combo.set_items(items, current)
-        self.table.setCellWidget(row, 2, combo)
-        self.rows.append((key, combo))
+    def _site_tenant(self, site_id):
+        return (self.sites.get(site_id) or {}).get("tenant_id") or self.default_tenant
 
     def accept(self):
-        for (kind, key), combo in self.rows:
-            target = self.site_map if kind == "site" else self.ap_sites
-            value = combo.valid_data()
-            if value:
-                target[key] = value
-            else:
-                target.pop(key, None)
+        result = {}
+        for key, site, tenant in self.rows:
+            if tenant.valid_data() is None:
+                self.show_error(f"Bitte für „{key[1]}“ einen Mandanten wählen.")
+                return
+            result[key] = {"site": site.valid_data() or None, "tenant": tenant.valid_data()}
+        self.result = result
         super().accept()
 
 
@@ -115,13 +131,20 @@ class AccessPointsPage(Page):
         self.role = SearchableComboBox("Geräterolle wählen …")
         self.role.setMinimumWidth(320)
         form.addRow("Geräterolle", self.role)
+        site_row = QHBoxLayout()
+        self.default_site = SearchableComboBox("Standort wählen …")
+        self.default_site.setMinimumWidth(320)
+        site_row.addWidget(self.default_site)
+        site_row.addWidget(label("Für neue APs ohne zugeordneten Standort – NetBox verlangt für jedes Gerät einen.",
+                                 muted=True), 1)
+        form.addRow("Standard-Standort", site_row)
         self.rename = checkbox("Namen vorhandener Geräte aus Sophos übernehmen", True)
         form.addRow("", self.rename)
         source.add(form)
         self.body.addWidget(source)
 
         result = Card("Abgleich")
-        self.sites_button = result.add_action(button("Standorte zuordnen …", "globe", on_click=self.map_sites))
+        self.sites_button = result.add_action(button("Standorte & Mandanten …", "globe", on_click=self.map_sites))
         self.refresh_button = result.add_action(button("Neu abgleichen", "refresh", on_click=self.compare))
         filters = QHBoxLayout()
         self.search = SearchField("Name, S/N, MAC, IP, Standort …")
@@ -141,7 +164,9 @@ class AccessPointsPage(Page):
             Column("ip", "IP-Adresse", 110),
             Column("site_hint", "Sophos-Standort", 170),
             Column("netbox_site", "NetBox-Standort", 190,
-                   color=lambda row: "warning" if row["state"] == "new" and not row.get("site_id") else None),
+                   color=lambda row: "warning" if row["state"] == "new" and not row.get("site_id")
+                   else ("text_muted" if str(row.get("netbox_site", "")).startswith("Standard:") else None)),
+            Column("tenant", "Mandant", 150),
             Column("netbox_device", "NetBox-Gerät", 170),
             Column("method", "Gefunden über", 110, color=lambda row: "text_muted"),
             Column("issues", "Hinweise", 260, value=lambda row: "; ".join(row.get("issues", [])),
@@ -169,6 +194,8 @@ class AccessPointsPage(Page):
             "open", (lambda row: row["state"] in ("new", "check")) if value else None))
         self.tenant.activated.connect(lambda _index: self._tenant_chosen())
         self.role.activated.connect(lambda _index: self._store(role_id=self.role.valid_data()))
+        self.default_site.activated.connect(lambda _index: (self._store(default_site=self.default_site.valid_data()),
+                                                            self._refresh()))
         self.rename.toggled.connect(lambda value: self._store(rename=value))
         self.state.profile_switched.connect(self._profile_switched)
         self._profile_switched()
@@ -190,6 +217,7 @@ class AccessPointsPage(Page):
         self.aps, self.only_netbox, self.engine, self.tenants = [], [], None, []
         self.tenant.set_items([])
         self.role.set_items([])
+        self.default_site.set_items([])
         self.rename.blockSignals(True)
         self.rename.setChecked(self._settings().get("rename", True))
         self.rename.blockSignals(False)
@@ -278,6 +306,9 @@ class AccessPointsPage(Page):
 
         def done(result):
             self.engine, self.aps, self.only_netbox = result
+            self.default_site.set_items([(site["name"] + (f" ({site['tenant']})" if site["tenant"] else ""),
+                                          site["id"]) for site in self.engine.ap_sites],
+                                        self._settings().get("default_site"))
             found = sum(1 for ap in self.aps if ap.get("device"))
             logger("app").log(25, "Abgleich: %s von %s APs in NetBox, %s nur in NetBox", found, len(self.aps),
                               len(self.only_netbox))
@@ -290,34 +321,52 @@ class AccessPointsPage(Page):
     # Table
     # ------------------------------------------------------------------
 
-    def _site_for(self, ap):
+    def _placement(self, ap):
+        """Site (optional) and tenant for a new AP: stored choice, else the suggestion."""
         settings = self._settings()
-        chosen = (settings.get("ap_sites") or {}).get(ap_key(ap)) or (settings.get("site_map") or {}).get(
+        stored = (settings.get("ap_sites") or {}).get(ap_key(ap)) or (settings.get("site_map") or {}).get(
             ap["site_hint"])
-        if chosen:
-            return chosen
-        return self.engine.suggest_site(ap["site_hint"]) if self.engine else None
+        if stored:
+            return dict(placement_value(stored), stored=True)
+        site = self.engine.suggest_site(ap["site_hint"]) if self.engine else None
+        return {"site": site, "tenant": None, "stored": False}
+
+    def _tenant_for(self, placement):
+        if placement.get("tenant"):
+            return placement["tenant"]
+        return self.engine._site_tenant(placement.get("site")) if self.engine else None
 
     def _site_name(self, site_id):
         sites = self.engine.ap_sites if self.engine else []
         return next((site["name"] for site in sites if site["id"] == site_id), "")
 
+    def _tenant_name(self, tenant_id):
+        tenants = self.engine.group_tenants if self.engine else []
+        return next((tenant["name"] for tenant in tenants if tenant["id"] == tenant_id), "")
+
     def _refresh(self):
         rows = []
+        default_site = self.default_site.valid_data()
         for ap in self.aps:
             device = ap.get("device")
-            site_id = None if device else self._site_for(ap)
+            site_id = tenant_name = None
             if device:
                 site = getattr(device, "site", None)
                 site_name = getattr(site, "name", "") or self._site_name(getattr(site, "id", site))
+                tenant_name = getattr(getattr(device, "tenant", None), "name", "") or self._tenant_name(
+                    related_id(device, "tenant"))
             elif self.engine:
-                site_name = self._site_name(site_id) if site_id else "– zuordnen –"
+                placement = self._placement(ap)
+                site_id = placement["site"] or default_site
+                site_name = (self._site_name(placement["site"]) if placement["site"] else
+                             f"Standard: {self._site_name(default_site)}" if default_site else "– Standard-Standort fehlt –")
+                tenant_name = self._tenant_name(self._tenant_for(placement))
             else:
                 site_name = ""
             state = "new" if not device else ("check" if ap["issues"] else "known")
             rows.append(dict(ap, key=ap_key(ap), state=state if self.engine else "", site_id=site_id,
-                             netbox_site=site_name, netbox_device=device.name if device else "",
-                             method=ap.get("method", "")))
+                             netbox_site=site_name, tenant=tenant_name or "",
+                             netbox_device=device.name if device else "", method=ap.get("method", "")))
         for device in self.only_netbox:
             rows.append({"key": f"netbox-{device.id}", "state": "netbox_only", "name": device.name,
                          "model": getattr(getattr(device, "device_type", None), "model", "") or "",
@@ -325,6 +374,7 @@ class AccessPointsPage(Page):
                          "ip": str(getattr(getattr(device, "primary_ip4", None), "address", "") or "").split("/")[0],
                          "site_hint": "", "netbox_site": getattr(getattr(device, "site", None), "name", "")
                          or self._site_name(related_id(device, "site")),
+                         "tenant": self._tenant_name(related_id(device, "tenant")),
                          "netbox_device": device.name, "method": "",
                          "issues": ["In NetBox, aber nicht im Sophos-Export"]})
         self.model.set_rows(rows)
@@ -336,7 +386,7 @@ class AccessPointsPage(Page):
                       f"{counts['netbox_only']} nur in NetBox"]
             missing_sites = sum(1 for row in rows if row["state"] == "new" and not row.get("site_id"))
             if missing_sites:
-                parts.append(f"{missing_sites} ohne NetBox-Standort")
+                parts.append(f"{missing_sites} ohne Standort – Standard-Standort wählen")
         elif self.aps:
             parts.append("Mandant wählen, um mit NetBox abzugleichen" if self._netbox_ready()
                          else "kein NetBox-Abgleich (kein Zugang im Profil oder Offline-Modus)")
@@ -361,18 +411,26 @@ class AccessPointsPage(Page):
         if not self.engine:
             return False
         new = self._new_aps()
-        hints = {}
+        groups = {}
         for ap in new:
             if ap["site_hint"]:
-                hints[ap["site_hint"]] = hints.get(ap["site_hint"], 0) + 1
-        settings = self._settings()
-        dialog = SiteMappingDialog(
-            self.window, [(hint, count, self.engine.suggest_site(hint)) for hint, count in sorted(hints.items())],
-            [ap for ap in new if not ap["site_hint"]], self.engine.ap_sites,
-            settings.get("site_map") or {}, settings.get("ap_sites") or {})
+                groups.setdefault(ap["site_hint"], []).append(ap)
+        rows = [(hint, len(members), ("site", hint), self._placement(members[0]))
+                for hint, members in sorted(groups.items(), key=lambda pair: pair[0].casefold())]
+        rows += [(f"{ap['name']} (ohne Sophos-Standort)", 1, ("ap", ap_key(ap)), self._placement(ap))
+                 for ap in new if not ap["site_hint"]]
+        if not rows:
+            self.window.toast("Alle Access Points sind bereits in NetBox.", "info")
+            return False
+        dialog = SiteMappingDialog(self.window, rows, self.engine.ap_sites, self.engine.group_tenants,
+                                   self.tenant.valid_data())
         if not dialog.exec():
             return False
-        self._store(site_map=dialog.site_map, ap_sites=dialog.ap_sites)
+        settings = self._settings()
+        site_map, ap_sites = dict(settings.get("site_map") or {}), dict(settings.get("ap_sites") or {})
+        for (kind, key), value in dialog.result.items():
+            (site_map if kind == "site" else ap_sites)[key] = value
+        self._store(site_map=site_map, ap_sites=ap_sites)
         self._refresh()
         return True
 
@@ -385,25 +443,29 @@ class AccessPointsPage(Page):
             widgets.message(self.window, "Geräterolle fehlt", "Für neue Access Points bitte eine Geräterolle wählen.",
                             "info")
             return
-        if any(not self._site_for(ap) for ap in new) and not self.map_sites():
+        if any(not self._placement(ap)["stored"] for ap in new) and not self.map_sites():
             return
-        sites = {ap_key(ap): self._site_for(ap) for ap in new}
-        missing = [ap["name"] for ap in new if not sites.get(ap_key(ap))]
-        if missing and not widgets.confirm(
-                self.window, "Standorte fehlen", f"{len(missing)} neue Access Points haben keinen NetBox-Standort und "
-                "werden übersprungen.", ok_text="Trotzdem fortfahren", details="\n".join(missing)):
+        default_site = self.default_site.valid_data()
+        placements = {}
+        for ap in new:
+            placement = self._placement(ap)
+            placements[ap_key(ap)] = {"site": placement["site"], "tenant": self._tenant_for(placement)}
+        homeless = [ap["name"] for ap in new if not placements[ap_key(ap)]["site"]]
+        if homeless and not default_site:
+            widgets.message(self.window, "Standard-Standort fehlt",
+                            f"{len(homeless)} neue Access Points haben keinen Standort. NetBox verlangt für jedes "
+                            "Gerät einen Standort – bitte oben einen Standard-Standort wählen.", "info",
+                            "\n".join(homeless))
             return
         engine, aps, rename = self.engine, list(self.aps), self.rename.isChecked()
 
-        def preview(ctx):
-            ctx.log("Berechne Änderungen …")
-            return engine.sync(aps, sites, role_id, rename, dry_run=True)
+        def run(dry_run):
+            return lambda ctx: engine.sync(aps, placements, role_id, rename, dry_run=dry_run, default_site=default_site)
 
         def show(report):
             def ask():
                 if ClientPreviewDialog(self.window, report).exec():
-                    self.tasks.run(lambda ctx: engine.sync(aps, sites, role_id, rename, dry_run=False),
-                                   title="Access Points übertragen", area="app", on_success=applied,
+                    self.tasks.run(run(False), title="Access Points übertragen", area="app", on_success=applied,
                                    on_error=self.actions._netbox_failed)
             QTimer.singleShot(0, ask)
 
@@ -416,5 +478,5 @@ class AccessPointsPage(Page):
             self.window.toast(text, "warning" if report["errors"] else "success")
             QTimer.singleShot(0, self.compare)
 
-        self.tasks.run(preview, title="Änderungen berechnen", area="app", on_success=show,
+        self.tasks.run(run(True), title="Änderungen berechnen", area="app", on_success=show,
                        on_error=self.actions._netbox_failed)

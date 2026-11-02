@@ -255,6 +255,22 @@ class EmptyState(QWidget):
         layout.addSpacing(6)
         layout.addLayout(buttons)
         layout.addStretch(2)
+        layout.setContentsMargins(24, 16, 24, 16)
+
+    def minimumSizeHint(self):
+        # Word-wrapped labels report almost no minimum height, so a small card
+        # would squeeze icon, title and text on top of each other.
+        width = max(self.width(), 320) - 48
+        height = 32 + 56 + self.title_label.heightForWidth(width) + self.text_label.heightForWidth(min(width, 520))
+        height += 2 * 10
+        if self.action is not None:
+            height += 16 + self.action.sizeHint().height()
+        return QSize(260, height)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if event.size().width() != event.oldSize().width():
+            self.updateGeometry()
 
     def set_text(self, title=None, text=None):
         if title is not None:

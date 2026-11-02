@@ -2,7 +2,14 @@ from types import SimpleNamespace
 
 from fake_netbox import FakeNetBox, Record
 
-from netbox_sync.core.switches import build_snapshot, match_interfaces, plan_switch_sync, sync_snapshot_to_netbox
+from netbox_sync.core.switches import (
+    build_snapshot,
+    match_interfaces,
+    parse_stack,
+    plan_switch_sync,
+    stack_member,
+    sync_snapshot_to_netbox,
+)
 from test_switches import COMWARE_BRIEF, COMWARE_LLDP
 
 
@@ -280,3 +287,91 @@ def test_legacy_network_choices_still_work_and_migrate(tmp_path):
     loaded = store.load()[0]["Kunde"]
     assert loaded["network_map"] == {"10.1.0.0/24": {"vrf_id": None, "vrf_name": "", "create": True}}
     assert "network_vrfs" not in loaded["switches"][0]
+
+
+CX_STACK_CONFIG = """
+hostname Switch36
+vsf member 1
+    type jl661a
+    link 1 1/1/49
+    link 2 1/1/50
+vsf member 2
+    type jl661a
+    link 1 2/1/49
+    link 2 2/1/51
+interface lag 1
+    no shutdown
+    no routing
+    vlan trunk native 1
+    vlan trunk allowed 10,200-204
+interface 1/1/1
+    no routing
+    vlan access 10
+interface 1/1/52
+    lag 1
+interface 2/1/1
+    no routing
+    vlan access 10
+interface 2/1/52
+    lag 1
+interface vlan 201
+    ip address 172.16.201.2/24
+"""
+
+
+def _stack_snapshot():
+    interfaces = [
+        {"name": name, "enabled": True, "connected": True, "media": "1GbT", "speed_mbps": 1000, "ip_addresses": [],
+         "vlans": {"untagged": [10], "tagged": [], "tagged_all": False}}
+        for name in ("1/1/1", "1/1/2", "2/1/1", "2/1/2")
+    ] + [{"name": "lag1", "enabled": True, "connected": True, "ip_addresses": [], "vlans": None}]
+    return {"platform": "aruba_cx", "interfaces": interfaces, "neighbors": [],
+            "stack": parse_stack(CX_STACK_CONFIG, "aruba_cx", interfaces)}
+
+
+def test_aruba_cx_vsf_stack_is_detected():
+    stack = parse_stack(CX_STACK_CONFIG, "aruba_cx")
+    assert stack == [{"member": 1, "model": "jl661a", "mac": ""}, {"member": 2, "model": "jl661a", "mac": ""}]
+    assert stack_member("2/1/5", "aruba_cx") == 2 and stack_member("lag1", "aruba_cx") is None
+    assert stack_member("GigabitEthernet2/0/5", "hpe_comware") == 2 and stack_member("2/A3", "aruba_aos") == 2
+    assert parse_stack("vsf member 1\n    type jl661a\n", "aruba_cx") == [], "one member is no stack"
+    aos = 'stacking\n   member 1 type "JL256A" mac-address 9020c2-000001\n   member 2 type "JL256A"\n   exit\n'
+    assert [(item["member"], item["model"]) for item in parse_stack(aos, "aruba_aos")] == [(1, "JL256A"), (2, "JL256A")]
+
+
+def test_stack_members_go_to_their_own_netbox_devices():
+    nb, switch, _snapshot = _numbered_setup()
+    snapshot = _stack_snapshot()
+    # Member 2 is its own NetBox device whose device type named the ports "1/1/x".
+    nb.dcim.devices.records.append(Record(nb.dcim.devices, id=4, name="access-01-2", tenant=SimpleNamespace(id=7)))
+    for index, name in enumerate(("1/1/1", "1/1/2"), start=60):
+        nb.dcim.interfaces.records.append(Record(nb.dcim.interfaces, id=index, name=name, device=SimpleNamespace(id=4),
+                                                 type=SimpleNamespace(value="1000base-t"), enabled=True, cable=None,
+                                                 label=""))
+
+    plan = plan_switch_sync(nb, switch, snapshot)
+    assert [(entry["member"], entry["device_id"], entry["ports"]) for entry in plan["stack"]] == [(1, 1, 2), (2, None, 2)]
+    assert plan["skipped_ports"] == 2
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False, dry_run=True)
+    assert report["notes"] == ["Stack-Mitglied 2: kein NetBox-Gerät gewählt – 2 Ports übersprungen"]
+
+    switch["stack_devices"] = {"1": 1, "2": 4}
+    plan = plan_switch_sync(nb, switch, snapshot)
+    by_name = {item["name"]: item for item in plan["interfaces"]}
+    assert by_name["2/1/1"]["owner_id"] == 4 and by_name["2/1/1"]["netbox_name"] == "1/1/1"
+    assert by_name["1/1/1"]["owner_id"] == 1 and by_name["1/1/1"]["netbox_name"] == "1"
+    assert plan["owner_interfaces"]["4"] == ["1/1/1", "1/1/2"]
+    sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False)
+    assert nb.dcim.interfaces.get(60).label == "10" and nb.dcim.interfaces.get(1).label == "10"
+    assert [(payload["device"], payload["name"]) for payload in nb.dcim.interfaces.created] == [(1, "lag1")]
+
+
+def test_virtual_chassis_positions_are_suggested():
+    nb, switch, _snapshot = _numbered_setup()
+    snapshot = _stack_snapshot()
+    nb.dcim.devices.get(1).virtual_chassis = SimpleNamespace(id=9)
+    nb.dcim.devices.get(1).vc_position = 1
+    nb.dcim.devices.records.append(Record(nb.dcim.devices, id=4, name="access-01-2", tenant=SimpleNamespace(id=7),
+                                          virtual_chassis=SimpleNamespace(id=9), vc_position=2))
+    plan = plan_switch_sync(nb, switch, snapshot)
+    assert [entry["device_id"] for entry in plan["stack"]] == [1, 4]

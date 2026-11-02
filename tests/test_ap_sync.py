@@ -74,7 +74,7 @@ def test_sync_creates_new_aps_with_site_tenant_and_updates_existing():
     engine.load_context(7)
     aps = parse_csv(CSV)
     engine.match(aps)
-    sites = {ap_key(aps[2]): 21}
+    sites = {ap_key(aps[2]): {"site": 21}}
 
     preview = engine.sync(aps, sites, role_id=30, dry_run=True)
     assert preview["errors"] == [] and preview["devices_created"] == 1 and preview["devices_updated"] == 2
@@ -101,4 +101,17 @@ def test_new_ap_without_site_is_an_error_not_a_guess():
     aps = parse_csv(CSV)
     engine.match(aps)
     report = engine.sync(aps, {}, role_id=30, dry_run=True)
-    assert report["errors"] == ["Büro ohne Standort: kein NetBox-Standort zugeordnet"]
+    assert report["errors"][0].startswith("Büro ohne Standort: kein Standort")
+
+
+def test_site_is_optional_with_default_site_and_tenant_can_be_chosen():
+    nb = _netbox()
+    engine = APSyncEngine(nb)
+    engine.load_context(7)
+    assert [tenant["name"] for tenant in engine.group_tenants] == ["Kunde Kita", "Kunde RZ"]
+    aps = parse_csv(CSV)
+    engine.match(aps)
+    # No site for the new AP: it goes to the default site, with an own tenant.
+    engine.sync(aps, {ap_key(aps[2]): {"site": None, "tenant": 8}}, role_id=30, dry_run=False, default_site=21)
+    created = nb.dcim.devices.created[-1]
+    assert (created["site"], created["tenant"]) == (21, 8)

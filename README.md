@@ -82,6 +82,10 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
   to the ports (802.1Q mode, untagged/tagged)
 - Tenant required: a switch without tenant in NetBox is refused; every created
   IP address, prefix, VRF, VLAN and cable gets the switch's tenant
+- Stacks are detected (Aruba CX VSF, ArubaOS-Switch stacking/VSF, HPE Comware
+  IRF): every member is assigned to its own NetBox device (suggested from the
+  NetBox virtual chassis positions, stored per switch) and gets its own ports;
+  LAGs and VLAN interfaces stay on the switch's device
 - Cables from LLDP/CDP, also with FQDN system names or via the management IP
 - The switch configuration is only changed when "Enable LLDP if needed" is
   explicitly switched on
@@ -95,7 +99,9 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
   name within the tenant group; NetBox APs of the tenant group that are missing
   in the export are listed as "only in NetBox"
 - Sophos sites are mapped to NetBox sites of the tenant group (suggested by
-  name, stored per profile); APs without a Sophos site get a site per AP
+  name, stored per profile); the site is optional – APs without one go to a
+  default site, since NetBox requires a site for every device. The tenant is
+  mandatory and can be chosen per Sophos site (default: the site's tenant)
 - New APs are created with Sophos device type, role, site, serial number,
   firmware, interface with MAC and IP address (primary IPv4); existing ones get
   missing serial numbers and tenants, optionally the Sophos name. Tenant comes

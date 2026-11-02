@@ -560,6 +560,10 @@ class SyncPreviewDialog(_Dialog):
                 child = QTreeWidgetItem([error])
                 child.setIcon(0, icon("warning", theme.color("danger")))
                 top.addChild(child)
+            for note in report.get("notes", []):
+                child = QTreeWidgetItem([note])
+                child.setIcon(0, icon("info", theme.color("warning")))
+                top.addChild(child)
             for change in changes[:2000]:
                 top.addChild(QTreeWidgetItem([change]))
             tree.addTopLevelItem(top)
@@ -598,6 +602,37 @@ class SwitchMappingDialog(_Dialog):
         self._new_vrf_names = []
         tabs = QTabWidget()
 
+        # Stack ---------------------------------------------------------------
+        self.stack_rows = []
+        stacks = [(switch, plan) for switch, plan in plans if plan.get("stack")]
+        if stacks:
+            stack_page = QWidget()
+            stack_layout = QVBoxLayout(stack_page)
+            stack_layout.setContentsMargins(0, 12, 0, 0)
+            stack_layout.addWidget(label(
+                "Der Switch ist ein Stack. Jedes Mitglied wird einem eigenen NetBox-Gerät zugeordnet, die Ports "
+                "kommen an das Gerät ihres Mitglieds (2/1/5 an das Gerät von Mitglied 2). LAGs und VLAN-Interfaces "
+                "bleiben am Gerät des Switch-Eintrags. Vorschlag: Positionen im Virtual Chassis von NetBox.",
+                muted=True, wrap=True))
+            self.stack_table = QTableWidget(0, 5)
+            self.stack_table.setHorizontalHeaderLabels(["Switch", "Mitglied", "Modell", "Ports", "NetBox-Gerät"])
+            for switch, plan in stacks:
+                items = [("– Ports überspringen –", 0)] + [(device["name"], device["id"]) for device in plan["devices"]]
+                for entry in plan["stack"]:
+                    row = self.stack_table.rowCount()
+                    self.stack_table.insertRow(row)
+                    texts = (switch["name"], str(entry["member"]), entry["model"], str(entry["ports"]))
+                    for column, text in enumerate(texts):
+                        self.stack_table.setItem(row, column, QTableWidgetItem(text))
+                    combo = SearchableComboBox("Gerät suchen …")
+                    combo.set_items(items, entry["device_id"] or 0)
+                    self.stack_table.setCellWidget(row, 4, combo)
+                    self.stack_rows.append((switch, entry, combo))
+            self._prepare_table(self.stack_table, (160, 80, 120, 70, 320))
+            stack_layout.addWidget(self.stack_table, 1)
+            open_members = sum(1 for _switch, entry, _combo in self.stack_rows if not entry["device_id"])
+            tabs.addTab(stack_page, f"Stack ({open_members} ohne Gerät)" if open_members else "Stack")
+
         # Interfaces --------------------------------------------------------
         interface_page = QWidget()
         interface_layout = QVBoxLayout(interface_page)
@@ -610,10 +645,12 @@ class SwitchMappingDialog(_Dialog):
         self.interface_rows = []
         for switch, plan in plans:
             vlans = {item["name"]: item["vlan_label"] for item in plan["interfaces"]}
-            choices = [("＋ neu anlegen", self.NEW)] + [(name, name) for name in plan["netbox_interfaces"]]
             for item in plan["interfaces"]:
                 if not item["physical"] and item["method"] in ("name", "new"):
                     continue
+                # In a stack every member has its own NetBox device and interfaces.
+                names = plan.get("owner_interfaces", {}).get(str(item.get("owner_id")), plan["netbox_interfaces"])
+                choices = [("＋ neu anlegen", self.NEW)] + [(name, name) for name in names]
                 row = self.interface_table.rowCount()
                 self.interface_table.insertRow(row)
                 combo = QComboBox()
@@ -897,8 +934,19 @@ class SwitchMappingDialog(_Dialog):
         result = {switch["id"]: {"interface_map": dict(switch.get("interface_map") or {}),
                                  "neighbor_devices": dict(switch.get("neighbor_devices") or {})}
                   for switch, _plan in self.plans}
+        # Members moved to another device: their port choices refer to the old
+        # device and are dropped, so the ports are matched again automatically.
+        moved = set()
+        for switch, entry, combo in self.stack_rows:
+            chosen = int(combo.valid_data() or 0)
+            result[switch["id"]].setdefault("stack_devices", {})[str(entry["member"])] = chosen
+            if chosen != (entry["device_id"] or 0) and entry["device_id"]:
+                moved.add((switch["id"], entry["device_id"]))
         used = {}
         for _row, switch, item, combo in self.interface_rows:
+            if (switch["id"], item.get("owner_id")) in moved:
+                result[switch["id"]]["interface_map"].pop(item["name"], None)
+                continue
             chosen = combo.currentData()
             target = "" if chosen == self.NEW else chosen
             mapping = result[switch["id"]]["interface_map"]

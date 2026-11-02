@@ -122,6 +122,7 @@ class APSyncEngine(ClientSyncEngine):
         self.tenant_id = None
         self.tenant_ids = set()
         self.ap_sites = []
+        self.group_tenants = []
         self.netbox_aps = []
 
     # ------------------------------------------------------------------
@@ -140,6 +141,8 @@ class APSyncEngine(ClientSyncEngine):
         if group_id:
             self.tenant_ids |= {item.id for item in self.nb.tenancy.tenants.filter(group_id=group_id)}
         tenants = {item.id: item.name for item in self.nb.tenancy.tenants.all()} if group_id else {tenant_id: tenant.name}
+        self.group_tenants = sorted(({"id": key, "name": tenants[key]} for key in self.tenant_ids if key in tenants),
+                                    key=lambda row: row["name"].casefold())
         self.ap_sites = sorted(({"id": site.id, "name": site.name, "tenant_id": related_id(site, "tenant"),
                                  "tenant": tenants.get(related_id(site, "tenant"), "")}
                                 for site in self.nb.dcim.sites.filter(**scope)), key=lambda row: row["name"].casefold())
@@ -237,21 +240,27 @@ class APSyncEngine(ClientSyncEngine):
         site = next((row for row in self.ap_sites if row["id"] == site_id), None)
         return (site or {}).get("tenant_id") or self.tenant_id
 
-    def sync(self, aps, sites, role_id, rename=True, dry_run=True):
-        """``sites`` maps ``ap_key`` to the NetBox site ID for new devices."""
+    def sync(self, aps, placements, role_id, rename=True, dry_run=True, default_site=None):
+        """``placements`` maps ``ap_key`` to ``{"site": ID or None, "tenant": ID}``.
+
+        The site is optional; NetBox needs one for every device, so new APs
+        without a site go to ``default_site``. The tenant is mandatory.
+        """
         report = self.new_report()
         self._planned = set()
         for ap in aps:
             try:
-                changes = self._sync_ap(ap, sites.get(ap_key(ap)), role_id, rename, dry_run, report)
+                changes = self._sync_ap(ap, placements.get(ap_key(ap)) or {}, role_id, rename, dry_run, report,
+                                        default_site)
             except Exception as error:  # noqa: BLE001 - one AP must not stop the others
                 report["errors"].append(f"{ap['name']}: {error}")
                 changes = [f"Fehler: {error}"]
             report["items"].append((ap["name"], changes))
         return report
 
-    def _sync_ap(self, ap, site_id, role_id, rename, dry_run, report):
+    def _sync_ap(self, ap, placement, role_id, rename, dry_run, report, default_site=None):
         device = ap.get("device")
+        site_id = placement.get("site") or default_site
         changes = []
         description = f"Firmware {ap['firmware']}" if ap["firmware"] else ""
         if device is not None:
@@ -265,7 +274,7 @@ class APSyncEngine(ClientSyncEngine):
             if ap["serial"] and not getattr(device, "serial", ""):
                 updates["serial"] = ap["serial"]
             if tenant is None:
-                updates["tenant"] = self._site_tenant(related_id(device, "site"))
+                updates["tenant"] = placement.get("tenant") or self._site_tenant(related_id(device, "site"))
             if description and (getattr(device, "description", "") or "").startswith("Firmware") \
                     and device.description != description:
                 updates["description"] = description
@@ -279,16 +288,18 @@ class APSyncEngine(ClientSyncEngine):
             else:
                 report["devices_unchanged"] += 1
                 changes.append(f"Vorhanden – gefunden über {ap['method']}")
-            tenant_id = tenant or self._site_tenant(related_id(device, "site"))
+            tenant_id = tenant or updates.get("tenant")
         else:
             if not site_id:
-                raise APImportError("kein NetBox-Standort zugeordnet")
+                raise APImportError("kein Standort – NetBox verlangt für Geräte einen Standort, bitte einen "
+                                    "Standard-Standort wählen")
             if not role_id:
                 raise APImportError("keine Geräterolle gewählt")
             manufacturer_id = self._manufacturer(MANUFACTURER, report, dry_run)
             type_id = self._device_type(MANUFACTURER, manufacturer_id, ap["model"] or "Access Point", report, dry_run)
             platform_id = self._platform(PLATFORM, report, dry_run)
-            tenant_id = self._site_tenant(site_id)
+            # An explicitly chosen tenant wins, otherwise the one of the site.
+            tenant_id = placement.get("tenant") or self._site_tenant(site_id)
             payload = {"name": ap["name"], "device_type": type_id, "role": role_id, "site": site_id,
                        "tenant": tenant_id, "status": "active", "platform": platform_id}
             if ap["serial"]:

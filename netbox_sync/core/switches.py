@@ -781,6 +781,48 @@ def _vlan_config_excerpt(config):
     return "\n".join(line for line in clean_output(config).splitlines() if _VLAN_CONFIG_LINE.search(line))
 
 
+# --------------------------------------------------------------------------
+# Stacks (Aruba CX VSF, ArubaOS-Switch stacking/VSF, HPE Comware IRF)
+# --------------------------------------------------------------------------
+
+_STACK_PORT = {
+    "aruba_cx": re.compile(r"^(\d+)/\d+/\d+$"),
+    "aruba_aos": re.compile(r"^(\d+)/[A-Z]?\d+$"),
+    "hpe_comware": re.compile(r"^[A-Za-z][A-Za-z\-]*(\d+)/\d+/\d+$"),
+}
+
+
+def stack_member(name, platform):
+    """Stack member of a port name (``2/1/5`` → 2) or ``None`` for LAGs, VLANs …"""
+    pattern = _STACK_PORT.get(platform)
+    match = pattern.match(name or "") if pattern else None
+    return int(match.group(1)) if match else None
+
+
+def parse_stack(config, platform, interfaces=()):
+    """Stack members as ``[{"member", "model", "mac"}]``; empty for a single switch."""
+    members = {}
+    text = clean_output(config or "")
+    if platform == "aruba_cx" or platform == "aruba_aos":
+        for match, body in _config_blocks(text, re.compile(r"^vsf member (\d+)\s*$", re.I)):
+            model = next((re.match(r"(?i)type\s+(\S+)", line).group(1) for line in body
+                          if re.match(r"(?i)type\s+\S+", line)), "")
+            members[int(match.group(1))] = {"model": model.strip('"'), "mac": ""}
+        # ArubaOS-Switch: "member 2 type "JL256A" mac-address 9020c2-123456" below "stacking"/"vsf".
+        for match in re.finditer(r'(?im)^\s+member (\d+) type "?([^"\s]+)"?(?:\s+mac-address (\S+))?', text):
+            members.setdefault(int(match.group(1)), {"model": match.group(2), "mac": match.group(3) or ""})
+    elif platform == "hpe_comware":
+        for match in re.finditer(r"(?im)^\s*irf member (\d+)\b", text):
+            members.setdefault(int(match.group(1)), {"model": "", "mac": ""})
+    for interface in interfaces:
+        member = stack_member(interface["name"], platform) if not interface.get("virtual") else None
+        if member is not None:
+            members.setdefault(member, {"model": "", "mac": ""})
+    if len(members) < 2:
+        return []
+    return [dict(members[member], member=member) for member in sorted(members)]
+
+
 def build_snapshot(outputs, platform):
     interfaces = parse_interfaces(outputs["interfaces"], platform)
     vlans = parse_vlans(outputs.get("config", ""), platform)
@@ -822,6 +864,7 @@ def build_snapshot(outputs, platform):
                 **({"vlan_config": _vlan_config_excerpt(outputs["config"])} if outputs.get("config") else {})},
         "vlans_read": bool(outputs.get("config")),
         "vlan_names": parse_vlan_names(outputs.get("config", "")),
+        "stack": parse_stack(outputs.get("config", ""), platform, interfaces),
         "lldp_disabled": outputs.get("lldp_disabled", False),
         "lldp_enabled_automatically": outputs.get("lldp_enabled_automatically", False),
         "discovered_at": time.time(),
@@ -1181,6 +1224,61 @@ def _switch_vlan_matches(nb, config, snapshot, tenant_id, site_id):
     return vlans, match_vlans(snapshot_vlan_ids(snapshot), names, vlans, tenant_id, site_id, config.get("vlan_map"))
 
 
+def stack_devices(nb, config, snapshot, device):
+    """``{member: NetBox device or None}`` for a stack, ``{}`` for a single switch.
+
+    Order: the choice stored in the profile (0 = skip the member), the member's
+    position in the NetBox virtual chassis of the switch, else the first member
+    is the switch's own device.
+    """
+    stack = snapshot.get("stack") or []
+    if not stack:
+        return {}
+    chosen = config.get("stack_devices") or {}
+    by_position = {}
+    chassis = related_id(device, "virtual_chassis")
+    if chassis:
+        for member_device in nb.dcim.devices.filter(virtual_chassis_id=chassis):
+            position = getattr(member_device, "vc_position", None)
+            if position is not None:
+                by_position[int(position)] = member_device
+    first = stack[0]["member"]
+    result = {}
+    for entry in stack:
+        member = entry["member"]
+        if str(member) in chosen:
+            device_id = int(chosen[str(member)] or 0)
+            result[member] = None if not device_id else (device if device_id == device.id
+                                                         else nb.dcim.devices.get(device_id))
+        else:
+            result[member] = by_position.get(member) or (device if member == first else None)
+    return result
+
+
+def _interface_owners(snapshot, members, device):
+    """NetBox device per discovered interface; ``None`` = member without device."""
+    platform = snapshot.get("platform")
+    owners = {}
+    for interface in snapshot["interfaces"]:
+        member = None if interface.get("virtual") or not members else stack_member(interface["name"], platform)
+        # LAGs, VLAN interfaces and loopbacks belong to the stack as a whole.
+        owners[interface["name"]] = members[member] if member in members else device
+    return owners
+
+
+def _match_by_owner(nb, snapshot, owners, manual):
+    groups = {}
+    for interface in snapshot["interfaces"]:
+        owner = owners[interface["name"]]
+        if owner is not None:
+            groups.setdefault(owner.id, (owner, []))[1].append(interface)
+    matches, records = {}, {}
+    for owner_id, (_owner, interfaces) in groups.items():
+        records[owner_id] = list(nb.dcim.interfaces.filter(device_id=owner_id))
+        matches.update(match_interfaces(interfaces, records[owner_id], manual))
+    return matches, records
+
+
 def plan_switch_sync(nb, config, snapshot):
     """Proposals for the review dialog: interface mapping, neighbor devices,
     networks (VRF and missing prefixes) and missing VLANs."""
@@ -1189,8 +1287,10 @@ def plan_switch_sync(nb, config, snapshot):
         tenant_id, error = _require_tenant(device)
     if error:
         return {"error": error}
-    records = list(nb.dcim.interfaces.filter(device_id=device.id))
-    matches = match_interfaces(snapshot["interfaces"], records, config.get("interface_map"))
+    members = stack_devices(nb, config, snapshot, device)
+    owners = _interface_owners(snapshot, members, device)
+    matches, owner_records = _match_by_owner(nb, snapshot, owners, config.get("interface_map"))
+    records = owner_records.get(device.id) or list(nb.dcim.interfaces.filter(device_id=device.id))
     scope, devices = candidate_devices(nb, device)
     known = {row["id"] for row in devices}
     lookup = _RemoteLookup(nb)
@@ -1208,6 +1308,11 @@ def plan_switch_sync(nb, config, snapshot):
             devices.append({"id": remote.id, "name": remote.name})
             known.add(remote.id)
         neighbors.append(dict(neighbor, device_id=device_id, method=method))
+    # Stack members may be chosen from the same list (including the switch itself).
+    for member_device in ([device, *filter(None, members.values())] if members else []):
+        if member_device.id not in known:
+            devices.append({"id": member_device.id, "name": member_device.name})
+            known.add(member_device.id)
     devices.sort(key=lambda row: row["name"].casefold())
 
     vrf_records = candidate_vrfs(nb, tenant_id)
@@ -1251,12 +1356,20 @@ def plan_switch_sync(nb, config, snapshot):
         "device": {"id": device.id, "name": device.name},
         "interfaces": [
             {"name": item["name"], "netbox_name": record.name if record else "", "method": method,
-             "physical": _physical_interface(item),
+             "physical": _physical_interface(item), "owner_id": owners[item["name"]].id,
              "vlan_label": vlan_label(without_vlans(item.get("vlans"), ignored_vlans(vlan_map)))}
-            for item in snapshot["interfaces"]
+            for item in snapshot["interfaces"] if owners[item["name"]] is not None
             for record, method in [matches[item["name"]]]
         ],
         "netbox_interfaces": sorted((record.name for record in records), key=_natural_key),
+        # NetBox interface names per device, for stacks with one device per member.
+        "owner_interfaces": {str(owner_id): sorted((record.name for record in owner_records[owner_id]),
+                                                   key=_natural_key) for owner_id in owner_records},
+        "stack": [dict(entry, device_id=members[entry["member"]].id if members.get(entry["member"]) else None,
+                       ports=sum(1 for item in snapshot["interfaces"]
+                                 if stack_member(item["name"], snapshot.get("platform")) == entry["member"]))
+                  for entry in snapshot.get("stack") or []],
+        "skipped_ports": sum(1 for owner in owners.values() if owner is None),
         "neighbors": neighbors,
         "device_scope": scope,
         "devices": devices,
@@ -1466,7 +1579,7 @@ def _new_report():
         "ips_created": 0, "ips_updated": 0, "ips_unchanged": 0,
         "cables_created": 0, "cables_skipped": 0,
         "vrfs_created": 0, "prefixes_created": 0, "vlans_created": 0,
-        "changes": [], "errors": [],
+        "changes": [], "errors": [], "notes": [],
     }
 
 
@@ -1489,13 +1602,24 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
     _sync_prefixes(nb, config, snapshot, tenant_id, vrf_ids, dry_run, report)
     vlan_ids = _sync_vlans(nb, config, snapshot, tenant_id, related_id(device, "site"), dry_run, report)
     ignored = ignored_vlans(config.get("vlan_map"))
-    matches = match_interfaces(snapshot["interfaces"], list(nb.dcim.interfaces.filter(device_id=device_id)),
-                               config.get("interface_map"))
+    members = stack_devices(nb, config, snapshot, device)
+    owners = _interface_owners(snapshot, members, device)
+    matches, _owner_records = _match_by_owner(nb, snapshot, owners, config.get("interface_map"))
+    own_devices = {device_id} | {member.id for member in members.values() if member is not None}
+    for member, member_device in members.items():
+        if member_device is None:
+            skipped = sum(1 for name, owner in owners.items() if owner is None
+                          and stack_member(name, snapshot.get("platform")) == member)
+            report["notes"].append(f"Stack-Mitglied {member}: kein NetBox-Gerät gewählt – {skipped} Ports übersprungen")
     records = {}
 
     for interface in snapshot["interfaces"]:
         key = interface_key(interface["name"])
+        owner = owners[interface["name"]]
+        if owner is None:
+            continue
         record, method = matches[interface["name"]]
+        where = f" auf {owner.name}" if owner.id != device_id else ""
         port = dict(interface, vlans=without_vlans(interface.get("vlans"), ignored))
         label = vlan_label(port["vlans"])
         try:
@@ -1518,14 +1642,14 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
                     if "mode" in changes:
                         texts.append(f"VLAN-Modus {changes['mode']}")
                     target = record.name if method == "name" else f"{record.name} ({interface['name']})"
-                    report["changes"].append(f"Interface {target}: {', '.join(texts)}")
+                    report["changes"].append(f"Interface {target}{where}: {', '.join(texts)}")
                     if not dry_run:
                         record.update(changes)
                 else:
                     report["interfaces_unchanged"] += 1
             else:
                 payload = {
-                    "device": device_id,
+                    "device": owner.id,
                     "name": interface["name"],
                     "type": netbox_interface_type(interface),
                     "enabled": bool(interface.get("enabled", True)),
@@ -1536,7 +1660,7 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
                 if interface.get("description"):
                     payload["description"] = interface["description"][:200]
                 report["interfaces_created"] += 1
-                report["changes"].append(f"Interface {interface['name']} neu ({payload['type']})"
+                report["changes"].append(f"Interface {interface['name']}{where} neu ({payload['type']})"
                                          + (f", Label „{label}“" if label else ""))
                 if not dry_run:
                     record = nb.dcim.interfaces.create(payload)
@@ -1610,7 +1734,7 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
                 if not remote_device:
                     report["cables_skipped"] += 1
                     continue
-                if remote_device.id == device_id:
+                if remote_device.id in own_devices:
                     continue
                 remote = lookup.interface(remote_device, neighbor)
                 if not remote or getattr(remote, "cable", None):
@@ -1632,8 +1756,10 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
 
 
 def describe_snapshot(snapshot):
+    stack = snapshot.get("stack") or []
     return (
-        f"{len(snapshot['interfaces'])} Schnittstellen, {len(snapshot.get('ip_addresses', []))} IP-Adressen, "
+        (f"Stack mit {len(stack)} Mitgliedern, " if stack else "")
+        + f"{len(snapshot['interfaces'])} Schnittstellen, {len(snapshot.get('ip_addresses', []))} IP-Adressen, "
         f"{len(snapshot.get('lldp_neighbors', []))} LLDP- und {len(snapshot.get('cdp_neighbors', []))} CDP-Nachbarn"
     )
 

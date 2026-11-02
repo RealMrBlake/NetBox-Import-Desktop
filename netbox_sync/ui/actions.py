@@ -433,6 +433,7 @@ class Actions:
             needs_review = any(
                 any(entry["method"] not in ("name", "new") or (entry["method"] == "new" and entry["physical"])
                     for entry in item["interfaces"]) or (create_cables and item["neighbors"])
+                or any(not member["device_id"] for member in item.get("stack", []))
                 or any(not network["stored"] and not network["existing"] for network in item["networks"])
                 or any(not vlan["stored"] and vlan["method"] in ("new", "ambiguous") for vlan in item["vlans"])
                 for _switch, item in reviewable)
