@@ -49,7 +49,8 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
 ### Switches (Aruba CX, ArubaOS-Switch/ProCurve, HPE Comware)
 
 - Add several NetBox devices in one step — host taken from the primary IP,
-  platform suggested from model/manufacturer
+  platform suggested from model/manufacturer; members of a NetBox virtual
+  chassis are added once, through the chassis master
 - Platform "detect automatically" via SSH
 - Parallel SSH queries; SSH host keys are stored on first contact and verified
   afterwards
@@ -95,18 +96,17 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
 - Loads the access point export of Sophos Central (comma or semicolon, UTF-8 or
   Windows encoding) and checks it: missing site, duplicate IP, serial number or
   MAC address
-- Finds existing APs in NetBox globally by serial number and MAC address and by
-  name within the tenant group; NetBox APs of the tenant group that are missing
-  in the export are listed as "only in NetBox"
-- Sophos sites are mapped to NetBox sites of the tenant group (suggested by
-  name, stored per profile); the site is optional – APs without one go to a
-  default site, since NetBox requires a site for every device. The tenant is
-  mandatory and can be chosen per Sophos site (default: the site's tenant)
+- No tenant to pick up front: existing APs are found in all of NetBox by serial
+  number, MAC address and name; Sophos APs in NetBox that are missing in the
+  export are listed as "only in NetBox" for the tenants the export concerns
+- Sophos sites are mapped to NetBox sites (suggested by name, stored per
+  profile); the site is optional – APs without one go to a default site, since
+  NetBox requires a site for every device. The tenant is mandatory and chosen
+  deliberately per Sophos site – it is never preselected
 - New APs are created with Sophos device type, role, site, serial number,
   firmware, interface with MAC and IP address (primary IPv4); existing ones get
-  missing serial numbers and tenants, optionally the Sophos name. Tenant comes
-  from the NetBox site, otherwise the selected tenant; devices of other tenants
-  are never changed. Preview before writing
+  missing serial numbers and tenants, optionally the Sophos name. Preview before
+  writing
 
 ### Network scanner (read only)
 

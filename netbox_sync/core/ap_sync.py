@@ -129,9 +129,21 @@ class APSyncEngine(ClientSyncEngine):
     # Context
     # ------------------------------------------------------------------
 
-    def load_context(self, tenant_id):
-        """Sites and existing Sophos devices of the tenant's tenant group."""
+    def load_context(self, tenant_id=None):
+        """Sites and existing Sophos devices of the tenant's tenant group, or of all of NetBox without a tenant."""
         self.tenant_id = tenant_id
+        if tenant_id is None:
+            tenants = {item.id: item.name for item in self.nb.tenancy.tenants.all()}
+            self.tenant_ids = set(tenants)
+            self.group_tenants = sorted(({"id": key, "name": name} for key, name in tenants.items()),
+                                        key=lambda row: row["name"].casefold())
+            self.ap_sites = sorted(({"id": site.id, "name": site.name, "tenant_id": related_id(site, "tenant"),
+                                     "tenant": tenants.get(related_id(site, "tenant"), "")}
+                                    for site in self.nb.dcim.sites.all()), key=lambda row: row["name"].casefold())
+            manufacturer = (self.nb.dcim.manufacturers.get(slug="sophos")
+                            or next(iter(self.nb.dcim.manufacturers.filter(name__ie=MANUFACTURER)), None))
+            self.netbox_aps = list(self.nb.dcim.devices.filter(manufacturer_id=manufacturer.id)) if manufacturer else []
+            return self.ap_sites
         tenant = self.nb.tenancy.tenants.get(tenant_id)
         if tenant is None:
             raise APImportError(f"Mandant #{tenant_id} existiert nicht.")

@@ -115,3 +115,16 @@ def test_site_is_optional_with_default_site_and_tenant_can_be_chosen():
     engine.sync(aps, {ap_key(aps[2]): {"site": None, "tenant": 8}}, role_id=30, dry_run=False, default_site=21)
     created = nb.dcim.devices.created[-1]
     assert (created["site"], created["tenant"]) == (21, 8)
+
+
+def test_without_tenant_the_whole_netbox_is_searched_and_tenant_comes_from_the_choice():
+    nb = _netbox()
+    engine = APSyncEngine(nb)
+    engine.load_context()
+    assert [tenant["name"] for tenant in engine.group_tenants] == ["Kunde Kita", "Kunde RZ"]
+    assert len(engine.ap_sites) == 2 and len(engine.netbox_aps) == 3
+    aps = parse_csv(CSV)
+    engine.match(aps)
+    assert [ap["device"].id if ap["device"] else None for ap in aps] == [102, 101, None]
+    report = engine.sync(aps, {ap_key(aps[2]): {"site": 21, "tenant": 7}}, role_id=30, dry_run=False)
+    assert report["errors"] == [] and nb.dcim.devices.created[-1]["tenant"] == 7
