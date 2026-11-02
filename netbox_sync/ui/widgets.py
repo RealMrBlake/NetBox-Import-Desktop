@@ -257,20 +257,26 @@ class EmptyState(QWidget):
         layout.addStretch(2)
         layout.setContentsMargins(24, 16, 24, 16)
 
-    def minimumSizeHint(self):
-        # Word-wrapped labels report almost no minimum height, so a small card
-        # would squeeze icon, title and text on top of each other.
-        width = max(self.width(), 320) - 48
-        height = 32 + 56 + self.title_label.heightForWidth(width) + self.text_label.heightForWidth(min(width, 520))
-        height += 2 * 10
+    def _heights(self, width):
+        width = max(width, 320) - 48
+        core = 32 + self.title_label.heightForWidth(width) + 10
         if self.action is not None:
-            height += 16 + self.action.sizeHint().height()
-        return QSize(260, height)
+            core += 16 + self.action.sizeHint().height()
+        return core, self.text_label.heightForWidth(min(width, 520)) + 10, 56 + 10
+
+    def minimumSizeHint(self):
+        # Title and button always fit; icon and text are dropped when space is short.
+        core, _text, _icon = self._heights(self.width())
+        return QSize(260, core)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if event.size().width() != event.oldSize().width():
-            self.updateGeometry()
+        # Word-wrapped labels report almost no minimum height, so a small card
+        # would squeeze icon, title, text and button on top of each other.
+        core, text, icon_height = self._heights(event.size().width())
+        available = event.size().height()
+        self.text_label.setVisible(available >= core + text)
+        self.icon_label.setVisible(available >= core + text + icon_height)
 
     def set_text(self, title=None, text=None):
         if title is not None:

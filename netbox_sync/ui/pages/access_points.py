@@ -144,7 +144,7 @@ class AccessPointsPage(Page):
         self.body.addWidget(source)
 
         result = Card("Abgleich")
-        self.sites_button = result.add_action(button("Standorte & Mandanten …", "globe", on_click=self.map_sites))
+        self.sites_button = result.add_action(button("Standorte && Mandanten …", "globe", on_click=self.map_sites))
         self.refresh_button = result.add_action(button("Neu abgleichen", "refresh", on_click=self.compare))
         filters = QHBoxLayout()
         self.search = SearchField("Name, S/N, MAC, IP, Standort …")
@@ -269,7 +269,8 @@ class AccessPointsPage(Page):
         def done(result):
             self.tenants, roles = result
             settings = self._settings()
-            self.tenant.set_items(self.tenants, settings.get("tenant_id"))
+            # The tenant is always chosen deliberately – never preselected.
+            self.tenant.set_items(self.tenants)
             role_id = settings.get("role_id") or next(
                 (role_id for name, role_id in roles if name.casefold() in ROLE_HINTS
                  or "access point" in name.casefold()), None)
