@@ -30,8 +30,10 @@ from netbox_sync.ui.widgets import (
     label,
 )
 
-STATE_TEXT = {"new": "neu", "known": "in NetBox", "check": "prüfen", "netbox_only": "nur in NetBox"}
-STATE_DOT = {"new": "accent", "known": "success", "check": "warning", "netbox_only": "text_faint"}
+STATE_TEXT = {"new": "neu", "known": "in NetBox", "check": "prüfen", "netbox_only": "nur in NetBox",
+              "ignored": "ignoriert"}
+STATE_DOT = {"new": "accent", "known": "success", "check": "warning", "netbox_only": "text_faint",
+             "ignored": "text_faint"}
 ROLE_HINTS = ("access point", "accesspoint", "access-point", "wlan", "wifi", "ap")
 
 
@@ -49,7 +51,8 @@ class SiteMappingDialog(_Dialog):
     def __init__(self, parent, rows, sites, tenants):
         super().__init__(parent, "Standorte & Mandanten zuordnen",
                          "Der Standort ist optional – APs ohne Zuordnung kommen an den Standard-Standort, weil NetBox "
-                         "für jedes Gerät einen Standort verlangt. Der Mandant ist Pflicht und wird bewusst gewählt.",
+                         "für jedes Gerät einen Standort verlangt. Der Mandant ist Pflicht und wird bewusst gewählt. Zeilen ohne "
+                         "Standort und ohne Mandant werden ignoriert.",
                          width=860)
         self.resize(980, 620)
         site_items = [("– kein Standort (Standard-Standort) –", 0)] + [
@@ -88,7 +91,7 @@ class SiteMappingDialog(_Dialog):
     def accept(self):
         result = {}
         for key, site, tenant in self.rows:
-            if tenant.valid_data() is None:
+            if tenant.valid_data() is None and site.valid_data():
                 self.show_error(f"Bitte für „{key[1]}“ einen Mandanten wählen.")
                 return
             result[key] = {"site": site.valid_data() or None, "tenant": tenant.valid_data()}
@@ -301,9 +304,11 @@ class AccessPointsPage(Page):
         stored = (settings.get("ap_sites") or {}).get(ap_key(ap)) or (settings.get("site_map") or {}).get(
             ap["site_hint"])
         if stored:
-            return dict(placement_value(stored), stored=True)
+            value = placement_value(stored)
+            # neither site nor tenant: the user chose to leave these APs out
+            return dict(value, stored=True, ignored=not value["site"] and not value["tenant"])
         site = self.engine.suggest_site(ap["site_hint"]) if self.engine else None
-        return {"site": site, "tenant": None, "stored": False}
+        return {"site": site, "tenant": None, "stored": False, "ignored": False}
 
     def _tenant_for(self, placement):
         return placement.get("tenant")
@@ -327,6 +332,8 @@ class AccessPointsPage(Page):
                 site_name = getattr(site, "name", "") or self._site_name(getattr(site, "id", site))
                 tenant_name = getattr(getattr(device, "tenant", None), "name", "") or self._tenant_name(
                     related_id(device, "tenant"))
+            elif self.engine and self._placement(ap)["ignored"]:
+                site_name = ""
             elif self.engine:
                 placement = self._placement(ap)
                 site_id = placement["site"] or default_site
@@ -335,7 +342,7 @@ class AccessPointsPage(Page):
                 tenant_name = self._tenant_name(self._tenant_for(placement))
             else:
                 site_name = ""
-            state = "new" if not device else ("check" if ap["issues"] else "known")
+            state = ("ignored" if self.engine and self._placement(ap)["ignored"] else "new") if not device                 else ("check" if ap["issues"] else "known")
             rows.append(dict(ap, key=ap_key(ap), state=state if self.engine else "", site_id=site_id,
                              netbox_site=site_name, tenant=tenant_name or "",
                              netbox_device=device.name if device else "", method=ap.get("method", "")))
@@ -360,6 +367,8 @@ class AccessPointsPage(Page):
         if self.engine:
             parts += [f"{counts['known']} in NetBox", f"{counts['new']} neu", f"{counts['check']} zu prüfen",
                       f"{counts['netbox_only']} nur in NetBox"]
+            if counts["ignored"]:
+                parts.append(f"{counts['ignored']} ignoriert")
             missing_sites = sum(1 for row in rows if row["state"] == "new" and not row.get("site_id"))
             if missing_sites:
                 parts.append(f"{missing_sites} ohne Standort – Standard-Standort wählen")
@@ -412,14 +421,16 @@ class AccessPointsPage(Page):
     def sync(self):
         if not self.engine or self.tasks.busy:
             return
-        new = self._new_aps()
+        new = [ap for ap in self._new_aps() if not self._placement(ap)["ignored"]]
         role_id = self.role.valid_data()
         if new and not role_id:
             widgets.message(self.window, "Geräterolle fehlt", "Für neue Access Points bitte eine Geräterolle wählen.",
                             "info")
             return
-        if any(not self._placement(ap)["stored"] for ap in new) and not self.map_sites():
-            return
+        if any(not self._placement(ap)["stored"] for ap in new):
+            if not self.map_sites():
+                return
+            new = [ap for ap in new if not self._placement(ap)["ignored"]]
         default_site = self.default_site.valid_data()
         placements = {}
         for ap in new:
@@ -432,7 +443,8 @@ class AccessPointsPage(Page):
                             "Gerät einen Standort – bitte oben einen Standard-Standort wählen.", "info",
                             "\n".join(homeless))
             return
-        engine, aps, rename = self.engine, list(self.aps), self.rename.isChecked()
+        engine, rename = self.engine, self.rename.isChecked()
+        aps = [ap for ap in self.aps if ap.get("device") or ap_key(ap) in placements]
 
         def run(dry_run):
             return lambda ctx: engine.sync(aps, placements, role_id, rename, dry_run=dry_run, default_site=default_site)

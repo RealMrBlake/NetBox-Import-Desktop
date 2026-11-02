@@ -102,7 +102,8 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
 - Sophos sites are mapped to NetBox sites (suggested by name, stored per
   profile); the site is optional – APs without one go to a default site, since
   NetBox requires a site for every device. The tenant is mandatory and chosen
-  deliberately per Sophos site – it is never preselected
+  deliberately per Sophos site – it is never preselected. Sophos sites left without site and tenant are
+  ignored (stored per profile) and not transferred
 - New APs are created with Sophos device type, role, site, serial number,
   firmware, interface with MAC and IP address (primary IPv4); existing ones get
   missing serial numbers and tenants, optionally the Sophos name. Preview before
