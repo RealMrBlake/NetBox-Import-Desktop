@@ -976,12 +976,14 @@ class SwitchMappingDialog(_Dialog):
             chosen = combo.currentData()
             target = "" if chosen == self.NEW else chosen
             mapping = result[switch["id"]]["interface_map"]
-            if target and (switch["id"], target) in used:
+            # Stack members have their own devices, so equal names are only a clash on the same device.
+            key = (switch["id"], item.get("owner_id"), target)
+            if target and key in used:
                 self.show_error(f"{switch['name']}: „{target}“ ist mehreren Schnittstellen zugeordnet "
-                                f"({used[(switch['id'], target)]}, {item['name']}).")
+                                f"({used[key]}, {item['name']}).")
                 return
             if target:
-                used[(switch["id"], target)] = item["name"]
+                used[key] = item["name"]
             # Plain name matches stay automatic; everything else is remembered.
             if item["method"] == "name" and target == item["netbox_name"]:
                 mapping.pop(item["name"], None)
