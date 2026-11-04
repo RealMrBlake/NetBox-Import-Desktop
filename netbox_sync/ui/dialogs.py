@@ -551,6 +551,9 @@ class SyncPreviewDialog(_Dialog):
         errors = sum(len(report["errors"]) for _switch, report in reports)
         if errors:
             items.append((f"{errors} Probleme", "error"))
+        notes = sum(len(report.get("notes", [])) for _switch, report in reports)
+        if notes:
+            items.append((f"{notes} Hinweis(e)", "warning"))
         for text, kind in items:
             summary.addWidget(Badge(text, kind))
         summary.addStretch(1)
@@ -566,7 +569,9 @@ class SyncPreviewDialog(_Dialog):
             changes = report["changes"]
             total_changes += len(changes)
             unchanged = report["interfaces_unchanged"]
-            top = QTreeWidgetItem([f"{switch['name']} — {len(changes)} Änderung(en), {unchanged} Interface(s) unverändert"])
+            hints = len(report.get("notes", []))
+            top = QTreeWidgetItem([f"{switch['name']} — {len(changes)} Änderung(en), {unchanged} Interface(s) unverändert"
+                                   + (f", {hints} Hinweis(e)" if hints else "")])
             top.setIcon(0, icon("network", theme.color("accent")))
             font = top.font(0)
             font.setBold(True)
@@ -595,7 +600,7 @@ class SyncPreviewDialog(_Dialog):
                 top.addChild(member)
                 member.setExpanded(True)
             tree.addTopLevelItem(top)
-            top.setExpanded(len(reports) == 1 or bool(report["errors"]))
+            top.setExpanded(len(reports) == 1 or bool(report["errors"]) or bool(hints))
         self.root.addWidget(tree, 1)
         if total_changes == 0:
             self.root.addWidget(Banner("NetBox ist bereits auf dem aktuellen Stand – es gibt nichts zu übertragen.", "success"))

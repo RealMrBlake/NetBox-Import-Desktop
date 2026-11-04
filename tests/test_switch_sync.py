@@ -596,3 +596,19 @@ def test_cables_to_patch_panels_and_busy_far_ends_are_kept():
     report = sync_snapshot_to_netbox(nb, switch, snapshot, update_cables=True)
     assert nb.dcim.cables.updates == []
     assert any("Gegenstelle hat bereits ein anderes Kabel" in note for note in report["notes"])
+
+
+def test_vlans_of_another_site_are_only_labelled():
+    nb, switch, snapshot = _numbered_setup()
+    nb.dcim.devices.get(1).site = SimpleNamespace(id=2)
+    nb.ipam.vlans.records += [
+        Record(nb.ipam.vlans, id=110, vid=10, name="MOBILE", tenant=SimpleNamespace(id=7), site=SimpleNamespace(id=1)),
+        Record(nb.ipam.vlans, id=120, vid=20, name="CLIENTS", tenant=SimpleNamespace(id=7), site=None),
+    ]
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False)
+    assert report["errors"] == []
+    assert nb.dcim.interfaces.get(1).label == "10" and getattr(nb.dcim.interfaces.get(1), "untagged_vlan", None) is None
+    assert nb.dcim.interfaces.get(2).untagged_vlan == 120, "global VLANs are always assigned"
+    assert [note for note in report["notes"] if "VLAN 10" in note] == [
+        "VLAN 10 „MOBILE“ gehört zu einem anderen Standort als access-01 – nur im Label vermerkt, nicht am Port "
+        "zugewiesen (VLAN global machen, um es zuzuweisen)"]

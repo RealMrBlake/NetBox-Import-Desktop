@@ -530,6 +530,8 @@ class Actions:
                                                  update_cables=update_cables)
                 for error in report["errors"]:
                     ctx.log(f"{switch['name']}: {error}", "error")
+                for note in report.get("notes", []):
+                    ctx.log(f"{switch['name']}: {note}", "warning")
                 reports.append((switch, report))
             return reports
 

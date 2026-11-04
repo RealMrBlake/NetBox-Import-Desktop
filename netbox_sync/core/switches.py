@@ -1571,8 +1571,12 @@ def _sync_prefixes(nb, config, snapshot, tenant_id, vrf_ids, dry_run, report):
             report["errors"].append(f"Prefix {network}: {error}")
 
 
-def _sync_vlans(nb, config, snapshot, tenant_id, site_id, dry_run, report):
-    """``{VLAN ID: NetBox ID}``; missing VLANs are only created when approved."""
+def _sync_vlans(nb, config, snapshot, tenant_id, site_id, dry_run, report, sites=None):
+    """``{VLAN ID: NetBox ID}``; missing VLANs are only created when approved.
+
+    ``sites`` receives ``{VLAN ID: (site ID or None, name)}`` for the site check of the ports.
+    """
+    sites = {} if sites is None else sites
     _vlans, matches = _switch_vlan_matches(nb, config, snapshot, tenant_id, site_id)
     approved = {int(vid) for vid, choice in (config.get("vlan_map") or {}).items() if choice.get("action") == "new"}
     approved |= {int(vid) for vid in config.get("create_vlans") or []}  # profiles of version 4.4.0
@@ -1580,6 +1584,7 @@ def _sync_vlans(nb, config, snapshot, tenant_id, site_id, dry_run, report):
     for vid, (record, method, name) in matches.items():
         if record is not None:
             present[vid] = record.id
+            sites[vid] = (related_id(record, "site"), getattr(record, "name", "") or str(vid))
             continue
         if method != "new" or vid not in approved:
             continue
@@ -1592,6 +1597,7 @@ def _sync_vlans(nb, config, snapshot, tenant_id, site_id, dry_run, report):
             if site_id:
                 payload["site"] = site_id
             present[vid] = _NEW if dry_run else nb.ipam.vlans.create(payload).id
+            sites[vid] = (site_id, name)
         except Exception as error:  # noqa: BLE001
             report["errors"].append(f"VLAN {vid}: {error}")
     return present
@@ -1674,6 +1680,24 @@ def _sync_switch_stack(nb, device, members, dry_run, report):
             endpoint.create({"device": device.id, "members": missing})
     except Exception as error:  # noqa: BLE001
         report["errors"].append(f"Switch-Stack (NetBox Utilities): {error}")
+
+
+def _vlans_for_site(vlan_ids, vlan_sites, site_id, owner, reported, report):
+    """VLANs a port of ``owner`` may use: NetBox only allows global VLANs or VLANs of the device's site.
+
+    Other VLANs stay in the label; each is reported once per device.
+    """
+    allowed = {}
+    for vid, netbox_id in vlan_ids.items():
+        vlan_site, name = vlan_sites.get(vid, (None, str(vid)))
+        if vlan_site in (None, site_id):
+            allowed[vid] = netbox_id
+        elif (owner.id, vid) not in reported:
+            reported.add((owner.id, vid))
+            report["notes"].append(f"VLAN {vid} „{name}“ gehört zu einem anderen Standort als {owner.name} – "
+                                   f"nur im Label vermerkt, nicht am Port zugewiesen (VLAN global machen, "
+                                   f"um es zuzuweisen)")
+    return allowed
 
 
 def _sync_lag_members(snapshot, owners, records, dry_run, report):
@@ -1811,7 +1835,8 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
     device_id = device.id
     vrf_ids = _sync_vrfs(nb, config, snapshot, tenant_id, dry_run, report)
     _sync_prefixes(nb, config, snapshot, tenant_id, vrf_ids, dry_run, report)
-    vlan_ids = _sync_vlans(nb, config, snapshot, tenant_id, related_id(device, "site"), dry_run, report)
+    vlan_sites = {}
+    vlan_ids = _sync_vlans(nb, config, snapshot, tenant_id, related_id(device, "site"), dry_run, report, vlan_sites)
     ignored = ignored_vlans(config.get("vlan_map"))
     members = stack_devices(nb, config, snapshot, device)
     owners = _interface_owners(snapshot, members, device)
@@ -1823,7 +1848,7 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
                           and stack_member(name, snapshot.get("platform")) == member)
             report["notes"].append(f"Stack-Mitglied {member}: kein NetBox-Gerät gewählt – {skipped} Ports übersprungen")
     _sync_switch_stack(nb, device, members, dry_run, report)
-    records = {}
+    records, foreign = {}, set()
 
     for interface in snapshot["interfaces"]:
         key = interface_key(interface["name"])
@@ -1834,6 +1859,7 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
         where = f" auf {owner.name}" if owner.id != device_id else ""
         port = dict(interface, vlans=without_vlans(interface.get("vlans"), ignored))
         label = port_label(port["vlans"], interface.get("lag"))
+        owner_vlans = _vlans_for_site(vlan_ids, vlan_sites, related_id(owner, "site"), owner, foreign, report)
         try:
             if record:
                 changes = {}
@@ -1843,7 +1869,7 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
                 # routed ports and snapshots without configuration.
                 if label and (getattr(record, "label", "") or "") != label:
                     changes["label"] = label
-                changes.update(_vlan_assignment(port, vlan_ids, record))
+                changes.update(_vlan_assignment(port, owner_vlans, record))
                 if changes:
                     report["interfaces_updated"] += 1
                     texts = []
@@ -1868,7 +1894,7 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
                 }
                 if label:
                     payload["label"] = label
-                payload.update(_vlan_assignment(port, vlan_ids))
+                payload.update(_vlan_assignment(port, owner_vlans))
                 if interface.get("description"):
                     payload["description"] = interface["description"][:200]
                 report["interfaces_created"] += 1
