@@ -10,7 +10,7 @@ from pathlib import Path
 
 import paramiko
 
-from netbox_sync.core.netbox import assign_mac, related_id
+from netbox_sync.core.netbox import assign_mac, normalize_mac, related_id
 
 PLATFORMS = {
     "auto": "Automatisch erkennen",
@@ -1474,7 +1474,17 @@ class _RemoteLookup:
                      if _physical_record(record) and _port_number(record.name) == number]
             if len(found) == 1:
                 return found[0]
-        return None
+        # Access points and phones often report their MAC address as port ID.
+        mac = normalize_mac(neighbor.get("remote_port"))
+        if mac:
+            found = [record for record in records.values()
+                     if normalize_mac(getattr(record, "mac_address", None)) == mac]
+            if len(found) == 1:
+                return found[0]
+        # An end device with a single port (e.g. an AP from the Sophos import) can only be cabled there.
+        physical = [record for record in records.values()
+                    if _physical_record(record) and not getattr(record, "mgmt_only", False)]
+        return physical[0] if len(physical) == 1 else None
 
 
 _NEW = "new"  # placeholder ID of objects a dry run would create
@@ -1623,7 +1633,7 @@ def _new_report():
     return {
         "interfaces_created": 0, "interfaces_updated": 0, "interfaces_unchanged": 0,
         "ips_created": 0, "ips_updated": 0, "ips_unchanged": 0,
-        "cables_created": 0, "cables_skipped": 0,
+        "cables_created": 0, "cables_updated": 0, "cables_skipped": 0,
         "vrfs_created": 0, "prefixes_created": 0, "vlans_created": 0,
         "changes": [], "errors": [], "notes": [],
     }
@@ -1736,8 +1746,55 @@ def _backup_config(nb, device, snapshot, dry_run, report):
         report["errors"].append(f"Konfigurations-Backup: {error}")
 
 
+def _term(value, key):
+    return value.get(key) if isinstance(value, dict) else getattr(value, key, None)
+
+
+def _termination_text(termination):
+    item = _term(termination, "object") or {}
+    owner = _term(_term(item, "device") or {}, "name")
+    return f"{owner} {_term(item, 'name')}" if owner else str(_term(item, "name") or _term(termination, "object_id"))
+
+
+def _check_cable(nb, local, remote, label, update_cables, dry_run, report):
+    """Compare an existing cable of a switch port with its LLDP/CDP neighbor.
+
+    NetBox is the source of truth: a different far end is only reported unless
+    ``update_cables`` is set. Cables to patch panels (front/rear ports) or with
+    several terminations are never touched.
+    """
+    cable = nb.dcim.cables.get(related_id(local, "cable"))
+    if cable is None:
+        report["cables_skipped"] += 1
+        return
+    sides = [list(_term(cable, "a_terminations") or []), list(_term(cable, "b_terminations") or [])]
+    local_side = next((side for side in sides if any(_term(item, "object_id") == local.id for item in side)), None)
+    far = sides[1] if local_side is sides[0] else sides[0]
+    if local_side is None or len(far) != 1 or _term(far[0], "object_type") != "dcim.interface":
+        report["cables_skipped"] += 1
+        return
+    if _term(far[0], "object_id") == remote.id:
+        report["cables_skipped"] += 1
+        return
+    old = _termination_text(far[0])
+    remote_cable = related_id(remote, "cable")
+    if not update_cables or (remote_cable and remote_cable != cable.id):
+        reason = ("Gegenstelle hat bereits ein anderes Kabel" if update_cables
+                  else "„Bestehende Kabel anpassen“ ist aus")
+        report["notes"].append(f"Kabel {label}: in NetBox mit {old} verbunden – nicht angepasst ({reason})")
+        return
+    report["cables_updated"] += 1
+    report["changes"].append(f"⚠ Kabel {label}: ersetzt bisherige Gegenstelle {old}")
+    if not dry_run:
+        cable.update({
+            "a_terminations": [{"object_type": "dcim.interface", "object_id": local.id}],
+            "b_terminations": [{"object_type": "dcim.interface", "object_id": remote.id}],
+        })
+        remote.cable = cable
+
+
 def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=False, log=_noop,
-                            backup_config=False):
+                            backup_config=False, update_cables=False):
     """Write a discovery snapshot to NetBox.
 
     With ``dry_run`` nothing is written; the returned report lists what would
@@ -1879,9 +1936,7 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
                 if key not in records:
                     continue
                 local = records[key]
-                if local is not None and getattr(local, "cable", None):
-                    report["cables_skipped"] += 1
-                    continue
+                existing = getattr(local, "cable", None) if local is not None else None
                 if neighbor["local_port"] in manual_devices:
                     # 0 means "no device" was chosen in the review dialog.
                     chosen = int(manual_devices[neighbor["local_port"]] or 0)
@@ -1894,6 +1949,12 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
                 if remote_device.id in own_devices:
                     continue
                 remote = lookup.interface(remote_device, neighbor)
+                if existing:
+                    if remote:
+                        _check_cable(nb, local, remote, f"{device.name} {label}", update_cables, dry_run, report)
+                    else:
+                        report["cables_skipped"] += 1
+                    continue
                 if not remote or getattr(remote, "cable", None):
                     report["cables_skipped"] += 1
                     continue

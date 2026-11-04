@@ -528,3 +528,71 @@ def test_config_backup_with_older_attachment_plugin():
     payload = app.netbox_attachments.created[0]
     assert (payload["object_type"], payload["object_id"]) == ("dcim.device", 1)
     assert app.netbox_attachment_assignments.created == []
+
+
+def test_cable_to_access_point_that_reports_its_mac_as_port():
+    nb, switch, snapshot = _numbered_setup()
+    nb.dcim.devices.records.append(Record(nb.dcim.devices, id=5, name="PC-AP-1", tenant=SimpleNamespace(id=7)))
+    nb.dcim.interfaces.records += [
+        Record(nb.dcim.interfaces, id=50, name="LAN", device=SimpleNamespace(id=5), mac_address="C8:4F:86:88:96:8E",
+               type=SimpleNamespace(value="1000base-t"), enabled=True, cable=None),
+        Record(nb.dcim.interfaces, id=51, name="LAN2", device=SimpleNamespace(id=5), mac_address=None,
+               type=SimpleNamespace(value="1000base-t"), enabled=True, cable=None),
+    ]
+    snapshot["neighbors"][0].update(system_name="AP6420-PA3007MFJ3BDX1A", remote_port="c8:4f:86:88:96:8e")
+    switch["neighbor_devices"] = {"1/1/2": 5}
+    sync_snapshot_to_netbox(nb, switch, snapshot)
+    assert nb.dcim.cables.created[0]["b_terminations"] == [{"object_type": "dcim.interface", "object_id": 50}]
+
+    # A device with a single port is cabled there even if neither name nor MAC match.
+    nb, switch, snapshot = _numbered_setup()
+    nb.dcim.devices.records.append(Record(nb.dcim.devices, id=5, name="PC-AP-1", tenant=SimpleNamespace(id=7)))
+    nb.dcim.interfaces.records.append(Record(nb.dcim.interfaces, id=50, name="eth0", device=SimpleNamespace(id=5),
+                                             type=SimpleNamespace(value="1000base-t"), enabled=True, cable=None))
+    snapshot["neighbors"][0].update(system_name="AP6420", remote_port="c8:4f:86:88:96:cc")
+    switch["neighbor_devices"] = {"1/1/2": 5}
+    sync_snapshot_to_netbox(nb, switch, snapshot)
+    assert nb.dcim.cables.created[0]["b_terminations"] == [{"object_type": "dcim.interface", "object_id": 50}]
+
+
+def _cabled_setup(far_type="dcim.interface"):
+    """Port 1/1/2 (NetBox "2") has a cable to "old-device eth9"; LLDP reports server-01 eth0."""
+    nb, switch, snapshot = _numbered_setup()
+    nb.dcim.interfaces.get(2).cable = SimpleNamespace(id=70)
+    far = {"object_type": far_type, "object_id": 99,
+           "object": {"name": "eth9", "device": {"name": "old-device"}}}
+    nb.dcim.cables.records.append(Record(nb.dcim.cables, id=70, a_terminations=[far],
+                                         b_terminations=[{"object_type": "dcim.interface", "object_id": 2}]))
+    switch["neighbor_devices"] = {"1/1/2": 2}
+    return nb, switch, snapshot
+
+
+def test_differing_cable_is_only_reported_by_default():
+    nb, switch, snapshot = _cabled_setup()
+    report = sync_snapshot_to_netbox(nb, switch, snapshot)
+    assert report["cables_updated"] == 0 and nb.dcim.cables.updates == []
+    assert any("in NetBox mit old-device eth9 verbunden – nicht angepasst" in note for note in report["notes"])
+
+
+def test_differing_cable_is_moved_when_allowed():
+    nb, switch, snapshot = _cabled_setup()
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, dry_run=True, update_cables=True)
+    assert report["cables_updated"] == 1 and nb.dcim.cables.updates == []
+    assert any(change.startswith("⚠ Kabel access-01") and "old-device eth9" in change for change in report["changes"])
+    sync_snapshot_to_netbox(nb, switch, snapshot, update_cables=True)
+    assert nb.dcim.cables.updates == [(70, {
+        "a_terminations": [{"object_type": "dcim.interface", "object_id": 2}],
+        "b_terminations": [{"object_type": "dcim.interface", "object_id": 20}]})]
+    assert nb.dcim.cables.created == []
+
+
+def test_cables_to_patch_panels_and_busy_far_ends_are_kept():
+    nb, switch, snapshot = _cabled_setup(far_type="dcim.frontport")
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, update_cables=True)
+    assert report["cables_updated"] == 0 and nb.dcim.cables.updates == [] and not report["notes"]
+
+    nb, switch, snapshot = _cabled_setup()
+    nb.dcim.interfaces.get(20).cable = SimpleNamespace(id=71)
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, update_cables=True)
+    assert nb.dcim.cables.updates == []
+    assert any("Gegenstelle hat bereits ein anderes Kabel" in note for note in report["notes"])

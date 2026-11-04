@@ -104,7 +104,15 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
   only added when the configuration changed (SHA-256 in the description).
   Older plugin versions (parent on the attachment) and newer ones (separate
   assignments) are supported; without the plugin the step is skipped with a note
-- Cables from LLDP/CDP, also with FQDN system names or via the management IP
+- Cables from LLDP/CDP, also with FQDN system names or via the management IP.
+  Neighbors that report their MAC address as port ID (e.g. access points) are
+  matched by MAC, and a device with a single physical port is cabled there
+- Existing cables are checked against LLDP/CDP: a different far end is reported
+  as a note. Only with the optional "Bestehende Kabel anpassen" (confirmed with
+  a warning, NetBox is the source of truth) the cable is moved to the reported
+  neighbor; such changes are marked with ⚠ in the preview. Cables to patch
+  panels (front/rear ports) and far ends that already have another cable are
+  never changed
 - The switch configuration is only changed when "Enable LLDP if needed" is
   explicitly switched on
 

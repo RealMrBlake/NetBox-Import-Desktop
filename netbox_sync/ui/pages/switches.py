@@ -93,6 +93,11 @@ class SwitchesPage(Page):
         self.cables_option = checkbox("Kabel aus LLDP/CDP anlegen",
                                       tooltip="Legt Kabel zwischen Schnittstellen an, deren Gegenstelle in NetBox "
                                               "eindeutig gefunden wird. Bestehende Kabel werden nie verändert.")
+        self.update_cables_option = checkbox(
+            "Bestehende Kabel anpassen",
+            tooltip="Achtung: NetBox ist die Source of Truth. Weicht ein vorhandenes Kabel vom LLDP/CDP-Nachbarn ab, "
+                    "wird es auf die vom Switch gemeldete Gegenstelle umgehängt. Kabel zu Patchpanels werden nie "
+                    "verändert. Ohne diese Option werden Abweichungen nur gemeldet.")
         self.backup_option = checkbox("Konfiguration als Anhang sichern",
                                       tooltip="Hängt die laufende Konfiguration als Textdatei an das NetBox-Gerät "
                                               "(Plugin netbox-attachments). Passwörter, Schlüssel und Communities "
@@ -103,6 +108,7 @@ class SwitchesPage(Page):
         filters.addWidget(self.only_neighbors)
         filters.addStretch(1)
         filters.addWidget(self.cables_option)
+        filters.addWidget(self.update_cables_option)
         filters.addWidget(self.backup_option)
         result_card.add(filters)
         result_columns = [
@@ -150,6 +156,8 @@ class SwitchesPage(Page):
         self.lldp_option.toggled.connect(lambda value: self.state.update_settings(enable_lldp=value))
         self.cables_option.toggled.connect(lambda value: self.state.update_settings(create_cables=value))
         self.backup_option.toggled.connect(lambda value: self.state.update_settings(backup_config=value))
+        self.update_cables_option.toggled.connect(self._toggle_update_cables)
+        self.cables_option.toggled.connect(self.update_cables_option.setEnabled)
         self.state.switches_changed.connect(self.refresh)
         self.state.profile_switched.connect(self.refresh)
         self.state.profile_edited.connect(self.refresh_switches)
@@ -162,10 +170,24 @@ class SwitchesPage(Page):
 
     def _load_settings(self):
         for widget, key in ((self.lldp_option, "enable_lldp"), (self.cables_option, "create_cables"),
-                            (self.backup_option, "backup_config")):
+                            (self.backup_option, "backup_config"), (self.update_cables_option, "update_cables")):
             widget.blockSignals(True)
             widget.setChecked(bool(self.state.settings.get(key)))
             widget.blockSignals(False)
+        self.update_cables_option.setEnabled(self.cables_option.isChecked())
+
+    def _toggle_update_cables(self, value):
+        if value and not widgets.confirm(
+                self.window, "Bestehende Kabel anpassen?",
+                "NetBox ist die Source of Truth. Mit dieser Option werden vorhandene Kabel, deren Gegenstelle nicht "
+                "zum LLDP/CDP-Nachbarn des Switches passt, umgehängt – die bisherige Verbindung geht in NetBox "
+                "verloren. Kabel zu Patchpanels bleiben unverändert. Jede Anpassung steht vorher in der Vorschau.",
+                ok_text="Einschalten", destructive=True):
+            self.update_cables_option.blockSignals(True)
+            self.update_cables_option.setChecked(False)
+            self.update_cables_option.blockSignals(False)
+            return
+        self.state.update_settings(update_cables=value)
 
     def _status_text(self, row):
         status = self.state.switch_status.get(row["id"])

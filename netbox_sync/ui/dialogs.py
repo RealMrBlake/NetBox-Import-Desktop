@@ -546,6 +546,8 @@ class SyncPreviewDialog(_Dialog):
                 items.append((f"{totals[key]} {text}", "info"))
         if create_cables:
             items.append((f"{totals.get('cables_created', 0)} Kabel", "info"))
+            if totals.get("cables_updated"):
+                items.append((f"{totals['cables_updated']} Kabel angepasst", "error"))
         errors = sum(len(report["errors"]) for _switch, report in reports)
         if errors:
             items.append((f"{errors} Probleme", "error"))

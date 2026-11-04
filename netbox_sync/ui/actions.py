@@ -433,6 +433,7 @@ class Actions:
             return
         by_id = {switch["id"]: switch for switch in self.state.switches}
         backup = self.state.settings.get("backup_config")
+        update_cables = create_cables and bool(self.state.settings.get("update_cables"))
         # VLAN and network decisions are shared by all switches of the profile.
         vlan_map = self.state.profile.setdefault("vlan_map", {})
         network_map = self.state.profile.setdefault("network_map", {})
@@ -500,7 +501,7 @@ class Actions:
                 ctx.progress(index, len(items), switch["name"])
                 ctx.log(f"{switch['name']}: berechne Änderungen …")
                 reports.append((switch, sync_snapshot_to_netbox(nb, switch, snapshot, create_cables, dry_run=True,
-                                                                 backup_config=backup)))
+                                                                 backup_config=backup, update_cables=update_cables)))
             return nb, reports
 
         def show_preview(result):
@@ -511,13 +512,13 @@ class Actions:
                 # follow-up task is not rejected as "still busy".
                 dialog = SyncPreviewDialog(self.window, reports, create_cables)
                 if dialog.exec():
-                    self._apply_switch_sync(nb, items, create_cables, log)
+                    self._apply_switch_sync(nb, items, create_cables, log, update_cables)
             QTimer.singleShot(0, ask)
 
         self.tasks.run(plan, title="Zuordnung ermitteln", area="switch", on_success=review,
                        on_error=self._netbox_failed)
 
-    def _apply_switch_sync(self, nb, items, create_cables, log):
+    def _apply_switch_sync(self, nb, items, create_cables, log, update_cables=False):
         def work(ctx):
             reports = []
             for index, (switch, snapshot) in enumerate(items):
@@ -525,7 +526,8 @@ class Actions:
                 ctx.progress(index, len(items), switch["name"])
                 ctx.log(f"{switch['name']}: übertrage nach NetBox …")
                 report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables, dry_run=False,
-                                                 backup_config=self.state.settings.get("backup_config"))
+                                                 backup_config=self.state.settings.get("backup_config"),
+                                                 update_cables=update_cables)
                 for error in report["errors"]:
                     ctx.log(f"{switch['name']}: {error}", "error")
                 reports.append((switch, report))
