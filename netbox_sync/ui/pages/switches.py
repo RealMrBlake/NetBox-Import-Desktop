@@ -93,12 +93,17 @@ class SwitchesPage(Page):
         self.cables_option = checkbox("Kabel aus LLDP/CDP anlegen",
                                       tooltip="Legt Kabel zwischen Schnittstellen an, deren Gegenstelle in NetBox "
                                               "eindeutig gefunden wird. Bestehende Kabel werden nie verändert.")
+        self.backup_option = checkbox("Konfiguration als Anhang sichern",
+                                      tooltip="Hängt die laufende Konfiguration als Textdatei an das NetBox-Gerät "
+                                              "(Plugin netbox-attachments). Passwörter, Schlüssel und Communities "
+                                              "werden entfernt; ein neuer Anhang entsteht nur bei Änderungen.")
         filters.addWidget(self.search, 2)
         filters.addWidget(self.switch_filter, 1)
         filters.addWidget(self.only_up)
         filters.addWidget(self.only_neighbors)
         filters.addStretch(1)
         filters.addWidget(self.cables_option)
+        filters.addWidget(self.backup_option)
         result_card.add(filters)
         result_columns = [
             Column("switch", "Switch", 140),
@@ -144,6 +149,7 @@ class SwitchesPage(Page):
         self.switch_table.selectionModel().selectionChanged.connect(self._update_buttons)
         self.lldp_option.toggled.connect(lambda value: self.state.update_settings(enable_lldp=value))
         self.cables_option.toggled.connect(lambda value: self.state.update_settings(create_cables=value))
+        self.backup_option.toggled.connect(lambda value: self.state.update_settings(backup_config=value))
         self.state.switches_changed.connect(self.refresh)
         self.state.profile_switched.connect(self.refresh)
         self.state.profile_edited.connect(self.refresh_switches)
@@ -155,7 +161,8 @@ class SwitchesPage(Page):
     # ------------------------------------------------------------------
 
     def _load_settings(self):
-        for widget, key in ((self.lldp_option, "enable_lldp"), (self.cables_option, "create_cables")):
+        for widget, key in ((self.lldp_option, "enable_lldp"), (self.cables_option, "create_cables"),
+                            (self.backup_option, "backup_config")):
             widget.blockSignals(True)
             widget.setChecked(bool(self.state.settings.get(key)))
             widget.blockSignals(False)

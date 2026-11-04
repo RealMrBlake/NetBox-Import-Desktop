@@ -4,6 +4,7 @@ from fake_netbox import Endpoint, FakeNetBox, Record
 
 from netbox_sync.core.switches import (
     build_snapshot,
+    mask_config,
     match_interfaces,
     parse_lags,
     parse_stack,
@@ -465,3 +466,65 @@ def test_lag_members_are_assigned_to_their_lag_in_netbox():
     assert not getattr(nb.dcim.interfaces.get(3), "lag", None)
     report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False, dry_run=True)
     assert not any("LAG lag1" in change for change in report["changes"]), "already assigned"
+
+
+class _AttachmentEndpoint(Endpoint):
+    def create(self, payload):
+        record = super().create(payload)
+        if self.assignments is not None:
+            record.assignments = []
+        return record
+
+    def filter(self, **kwargs):
+        query = kwargs.pop("q", "")
+        return [item for item in super().filter(**kwargs) if query in (getattr(item, "description", "") or "")]
+
+
+def _attachments(newer=True):
+    attachments = _AttachmentEndpoint()
+    attachments.assignments = [] if newer else None
+    return SimpleNamespace(netbox_attachments=attachments, netbox_attachment_assignments=Endpoint())
+
+
+def test_config_backup_masks_secrets():
+    config = ('hostname core\nuser admin group administrators password ciphertext AQBapW==\n'
+              'snmp-server community geheim\nradius-server host 10.0.0.1 key plaintext topsecret\n')
+    masked = mask_config(config)
+    assert "AQBapW" not in masked and "geheim" not in masked and "topsecret" not in masked
+    assert "hostname core" in masked and "password <entfernt>" in masked
+
+
+def test_config_is_attached_only_when_it_changed():
+    nb, switch, snapshot = _numbered_setup()
+    snapshot["config_backup"] = "hostname access-01"
+    # Without the plugin nothing happens.
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False, backup_config=True)
+    assert not report["errors"]
+
+    nb.plugins = SimpleNamespace(netbox_attachments=_attachments())
+    app = nb.plugins.netbox_attachments
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False, dry_run=True, backup_config=True)
+    assert any(change.startswith("Konfigurations-Backup: Anhang „Running-Config access-01")
+               for change in report["changes"]) and app.netbox_attachments.created == []
+    sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False, backup_config=True)
+    payload = app.netbox_attachments.created[0]
+    assert payload["file"][1].getvalue() == b"hostname access-01" and payload["file"][0].endswith(".txt")
+    assert app.netbox_attachment_assignments.created == [
+        {"attachment": app.netbox_attachments.records[0].id, "object_type": "dcim.device", "object_id": 1}]
+
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False, dry_run=True, backup_config=True)
+    assert not any("Konfigurations-Backup" in change for change in report["changes"]), "unchanged"
+    snapshot["config_backup"] = "hostname access-01\nvlan 10"
+    sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False, backup_config=True)
+    assert len(app.netbox_attachments.created) == 2
+
+
+def test_config_backup_with_older_attachment_plugin():
+    nb, switch, snapshot = _numbered_setup()
+    snapshot["config_backup"] = "hostname access-01"
+    nb.plugins = SimpleNamespace(netbox_attachments=_attachments(newer=False))
+    app = nb.plugins.netbox_attachments
+    sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False, backup_config=True)
+    payload = app.netbox_attachments.created[0]
+    assert (payload["object_type"], payload["object_id"]) == ("dcim.device", 1)
+    assert app.netbox_attachment_assignments.created == []

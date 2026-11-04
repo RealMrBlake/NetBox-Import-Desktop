@@ -1,5 +1,7 @@
 """SSH discovery and NetBox synchronization for HPE and Aruba switches."""
 
+import hashlib
+import io
 import ipaddress
 import re
 import threading
@@ -805,6 +807,15 @@ def parse_lags(config, platform):
     return lags
 
 
+# Values after these words are removed from configuration backups.
+_SECRET = re.compile(r"(?i)\b(password|secret|key|community|ciphertext|plaintext|psk|passphrase)\b(\s+).*$")
+
+
+def mask_config(config):
+    """Running configuration without passwords, keys and SNMP communities."""
+    return "\n".join(_SECRET.sub(r"\1\2<entfernt>", line) for line in clean_output(config).splitlines()).strip()
+
+
 def _vlan_config_excerpt(config):
     """Keep only VLAN-related lines – the full configuration may contain secrets."""
     return "\n".join(line for line in clean_output(config).splitlines() if _VLAN_CONFIG_LINE.search(line))
@@ -897,6 +908,7 @@ def build_snapshot(outputs, platform):
         "raw": {**{key: value for key, value in outputs.items() if key != "config"},
                 **({"vlan_config": _vlan_config_excerpt(outputs["config"])} if outputs.get("config") else {})},
         "vlans_read": bool(outputs.get("config")),
+        "config_backup": mask_config(outputs["config"]) if outputs.get("config") else "",
         "vlan_names": parse_vlan_names(outputs.get("config", "")),
         "stack": parse_stack(outputs.get("config", ""), platform, interfaces),
         "lldp_disabled": outputs.get("lldp_disabled", False),
@@ -1678,7 +1690,54 @@ def _sync_lag_members(snapshot, owners, records, dry_run, report):
                 report["errors"].append(f"Interface {interface['name']}: LAG {names[lag_key]}: {error}")
 
 
-def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=False, log=_noop):
+def _backup_config(nb, device, snapshot, dry_run, report):
+    """Attach the running configuration to the device (optional netbox-attachments plugin).
+
+    A new attachment is only added when the configuration of this device changed
+    since the last backup; the hash in the description identifies it.
+    """
+    config = snapshot.get("config_backup")
+    if not config:
+        report["notes"].append("Konfigurations-Backup: keine Konfiguration ausgelesen")
+        return
+    digest = hashlib.sha256(f"{device.id}\n{config}".encode("utf-8")).hexdigest()[:16]
+    try:
+        app = nb.plugins.netbox_attachments
+        known = [item for item in app.netbox_attachments.filter(q=digest)
+                 if digest in (getattr(item, "description", "") or "")]
+    except AttributeError:
+        return
+    except Exception as error:  # noqa: BLE001
+        if getattr(getattr(error, "req", None), "status_code", None) == 404:
+            report["notes"].append("Konfigurations-Backup übersprungen: Plugin netbox-attachments ist nicht installiert")
+        else:
+            report["errors"].append(f"Konfigurations-Backup: {error}")
+        return
+    if known:
+        return
+    stamp = time.strftime("%Y-%m-%d %H-%M", time.localtime(snapshot.get("discovered_at") or time.time()))
+    name = f"Running-Config {device.name} {stamp}"
+    report["changes"].append(f"Konfigurations-Backup: Anhang „{name}“")
+    if dry_run:
+        return
+    filename = re.sub(r"[^\w.-]+", "_", f"{device.name}_{stamp}") + ".txt"
+    try:
+        attachment = app.netbox_attachments.create({
+            "name": name, "description": f"Running-Config, SHA-256 {digest}",
+            # Older plugin versions keep the parent on the attachment itself.
+            "object_type": "dcim.device", "object_id": device.id,
+            "file": (filename, io.BytesIO(config.encode("utf-8")), "text/plain"),
+        })
+        if hasattr(attachment, "assignments"):
+            # Newer plugin versions assign attachments to objects separately.
+            app.netbox_attachment_assignments.create({"attachment": attachment.id, "object_type": "dcim.device",
+                                                      "object_id": device.id})
+    except Exception as error:  # noqa: BLE001
+        report["errors"].append(f"Konfigurations-Backup: {error}")
+
+
+def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=False, log=_noop,
+                            backup_config=False):
     """Write a discovery snapshot to NetBox.
 
     With ``dry_run`` nothing is written; the returned report lists what would
@@ -1850,6 +1909,8 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
                     remote.cable = True  # avoid a second cable from the reverse direction
             except Exception as error:  # noqa: BLE001
                 report["errors"].append(f"Nachbar {label}: {error}")
+    if backup_config:
+        _backup_config(nb, device, snapshot, dry_run, report)
     return report
 
 

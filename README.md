@@ -97,6 +97,13 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
   plugin (0.24.0 or later) a detected stack is also entered as its switch stack
   (the switch's device as stack switch, the other member devices as members);
   members entered by hand are kept. Without the plugin this step is skipped
+- Optional configuration backup ("Konfiguration als Anhang sichern"): with the
+  [netbox-attachments](https://github.com/Kani999/netbox-attachments) plugin the
+  running configuration is attached to the switch's device as a text file.
+  Passwords, keys and SNMP communities are removed first; a new attachment is
+  only added when the configuration changed (SHA-256 in the description).
+  Older plugin versions (parent on the attachment) and newer ones (separate
+  assignments) are supported; without the plugin the step is skipped with a note
 - Cables from LLDP/CDP, also with FQDN system names or via the management IP
 - The switch configuration is only changed when "Enable LLDP if needed" is
   explicitly switched on

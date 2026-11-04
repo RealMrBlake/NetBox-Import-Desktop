@@ -432,6 +432,7 @@ class Actions:
         if not self.require_netbox_config():
             return
         by_id = {switch["id"]: switch for switch in self.state.switches}
+        backup = self.state.settings.get("backup_config")
         # VLAN and network decisions are shared by all switches of the profile.
         vlan_map = self.state.profile.setdefault("vlan_map", {})
         network_map = self.state.profile.setdefault("network_map", {})
@@ -498,7 +499,8 @@ class Actions:
             for index, (switch, snapshot) in enumerate(items):
                 ctx.progress(index, len(items), switch["name"])
                 ctx.log(f"{switch['name']}: berechne Änderungen …")
-                reports.append((switch, sync_snapshot_to_netbox(nb, switch, snapshot, create_cables, dry_run=True)))
+                reports.append((switch, sync_snapshot_to_netbox(nb, switch, snapshot, create_cables, dry_run=True,
+                                                                 backup_config=backup)))
             return nb, reports
 
         def show_preview(result):
@@ -522,7 +524,8 @@ class Actions:
                 ctx.check_cancelled()
                 ctx.progress(index, len(items), switch["name"])
                 ctx.log(f"{switch['name']}: übertrage nach NetBox …")
-                report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables, dry_run=False)
+                report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables, dry_run=False,
+                                                 backup_config=self.state.settings.get("backup_config"))
                 for error in report["errors"]:
                     ctx.log(f"{switch['name']}: {error}", "error")
                 reports.append((switch, report))
