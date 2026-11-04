@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from fake_netbox import FakeNetBox, Record
+from fake_netbox import Endpoint, FakeNetBox, Record
 
 from netbox_sync.core.switches import (
     build_snapshot,
@@ -364,6 +364,32 @@ def test_stack_members_go_to_their_own_netbox_devices():
     sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False)
     assert nb.dcim.interfaces.get(60).label == "10" and nb.dcim.interfaces.get(1).label == "10"
     assert [(payload["device"], payload["name"]) for payload in nb.dcim.interfaces.created] == [(1, "lag1")]
+
+
+def test_stack_is_filled_in_netbox_utilities_when_the_plugin_exists():
+    nb, switch, _snapshot = _numbered_setup()
+    snapshot = _stack_snapshot()
+    nb.dcim.devices.records.append(Record(nb.dcim.devices, id=4, name="access-01-2", tenant=SimpleNamespace(id=7)))
+    switch["stack_devices"] = {"1": 1, "2": 4}
+    # Without the plugin the stack is simply not written.
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False)
+    assert not report["errors"] and not any("Switch-Stack" in change for change in report["changes"])
+
+    nb.plugins = SimpleNamespace(utilities=SimpleNamespace(switch_stacks=Endpoint()))
+    stacks = nb.plugins.utilities.switch_stacks
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False, dry_run=True)
+    assert "Switch-Stack access-01 neu mit Mitgliedern access-01-2 (NetBox Utilities)" in report["changes"]
+    assert stacks.created == []
+    sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False)
+    assert stacks.created == [{"device": 1, "members": [4]}]
+    stacks.records[0].device = SimpleNamespace(id=1)
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False, dry_run=True)
+    assert not any("Switch-Stack" in change for change in report["changes"]), "already complete"
+
+    # Members entered by hand stay, missing ones are added.
+    stacks.records[0].members = [9]
+    sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False)
+    assert stacks.updates[-1] == (stacks.records[0].id, {"members": [9, 4]})
 
 
 def test_virtual_chassis_positions_are_suggested():

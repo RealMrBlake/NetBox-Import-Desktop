@@ -1583,6 +1583,43 @@ def _new_report():
     }
 
 
+def _sync_switch_stack(nb, device, members, dry_run, report):
+    """Fill in the switch stack of the optional NetBox Utilities plugin.
+
+    The switch's device is the stack switch, the other member devices are
+    added to it; members entered by hand stay. Without the plugin nothing happens.
+    """
+    others = {member.id: member for member in members.values() if member is not None and member.id != device.id}
+    if not others:
+        return
+    try:
+        endpoint = nb.plugins.utilities.switch_stacks
+        stacks = list(endpoint.filter(device_id=device.id))
+    except AttributeError:
+        return
+    except Exception as error:  # noqa: BLE001
+        if getattr(getattr(error, "req", None), "status_code", None) != 404:
+            report["errors"].append(f"Switch-Stack (NetBox Utilities): {error}")
+        return
+    stack = stacks[0] if stacks else None
+    current = [getattr(item, "id", item) for item in (getattr(stack, "members", None) or [])]
+    missing = [member_id for member_id in others if member_id not in current]
+    if not missing:
+        return
+    names = ", ".join(others[member_id].name for member_id in missing)
+    report["changes"].append(f"Switch-Stack {device.name}: Mitglieder {names} eintragen (NetBox Utilities)"
+                             if stack else f"Switch-Stack {device.name} neu mit Mitgliedern {names} (NetBox Utilities)")
+    if dry_run:
+        return
+    try:
+        if stack:
+            stack.update({"members": current + missing})
+        else:
+            endpoint.create({"device": device.id, "members": missing})
+    except Exception as error:  # noqa: BLE001
+        report["errors"].append(f"Switch-Stack (NetBox Utilities): {error}")
+
+
 def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=False, log=_noop):
     """Write a discovery snapshot to NetBox.
 
@@ -1611,6 +1648,7 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
             skipped = sum(1 for name, owner in owners.items() if owner is None
                           and stack_member(name, snapshot.get("platform")) == member)
             report["notes"].append(f"Stack-Mitglied {member}: kein NetBox-Gerät gewählt – {skipped} Ports übersprungen")
+    _sync_switch_stack(nb, device, members, dry_run, report)
     records = {}
 
     for interface in snapshot["interfaces"]:

@@ -87,6 +87,10 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
   IRF): every member is assigned to its own NetBox device (suggested from the
   NetBox virtual chassis positions, stored per switch) and gets its own ports;
   LAGs and VLAN interfaces stay on the switch's device
+- Optional: with the [NetBox Utilities](https://git.mrblake.cc/MrBlake/Netbox-Utilities)
+  plugin (0.24.0 or later) a detected stack is also entered as its switch stack
+  (the switch's device as stack switch, the other member devices as members);
+  members entered by hand are kept. Without the plugin this step is skipped
 - Cables from LLDP/CDP, also with FQDN system names or via the management IP
 - The switch configuration is only changed when "Enable LLDP if needed" is
   explicitly switched on
