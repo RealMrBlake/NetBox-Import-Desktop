@@ -62,6 +62,12 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
 - VLAN membership per port (untagged and tagged, read from the running
   configuration) is written to the interface **label**, e.g. `10` or `1,20-22`;
   only VLAN-related lines of the configuration are kept in the raw data
+- LAG members (Aruba CX `lag N`, ArubaOS-Switch `trunk … trkN`, Comware
+  `port link-aggregation group N`) get their LAG in the label, e.g.
+  `10,20 (LAG 1)`, and are assigned to the LAG interface in NetBox (field
+  *LAG*; only on the same device). Members without own VLAN configuration take
+  the VLANs of their LAG. NetBox Utilities 0.25.0 or later ignores the LAG note
+  when it evaluates VLAN labels
 - Automatic port mapping when NetBox names differ from the switch (e.g. `5` ↔
   `1/1/5`): equal name, then equal port number, then natural order
 - **Mapping review** before the preview: non-obvious port mappings and every

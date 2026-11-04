@@ -608,8 +608,8 @@ def _parse_neighbor_table(output):
 # VLAN membership from the running configuration
 # --------------------------------------------------------------------------
 
-_PORT_RANGE = re.compile(r"^(\D*(?:\d+/)*)(\d+)-(?:\1)?(\d+)$")
-_VLAN_CONFIG_LINE = re.compile(r"(?i)^\s*(?:interface\s|vlan\s|#|exit|\s*(?:no\s+)?routing\b)|vlan|tagged|link-type|link-mode")
+_PORT_RANGE = re.compile(r"^(\D*(?:\d+/)*[A-Za-z]?)(\d+)-(?:\1)?(\d+)$")
+_VLAN_CONFIG_LINE = re.compile(r"(?i)^\s*(?:interface\s|vlan\s|#|exit|\s*(?:no\s+)?routing\b)|vlan|tagged|link-type|link-mode|^\s*lag \d|^trunk\s|link-aggregation")
 
 
 def parse_vlan_list(text):
@@ -776,6 +776,35 @@ def vlan_label(vlans, limit=64):
     return text
 
 
+def port_label(vlans, lag=None, limit=64):
+    """NetBox label of a port: its VLANs plus its LAG, e.g. ``10,20 (LAG 1)``."""
+    number = re.search(r"(\d+)$", lag or "")
+    suffix = f"(LAG {number.group(1)})" if number else ""
+    text = vlan_label(vlans, limit - len(suffix) - 1 if suffix else limit)
+    return f"{text} {suffix}".strip()
+
+
+def parse_lags(config, platform):
+    """LAG of every member port as ``{interface_key(port): LAG name}``."""
+    lags = {}
+    if platform == "aruba_aos":
+        # "trunk 49-50 trk1 lacp" is a global line.
+        for match in re.finditer(r"(?im)^trunk\s+(\S+)\s+trk(\d+)\b", clean_output(config or "")):
+            for port in _expand_ports(match.group(1)):
+                lags[interface_key(port)] = f"Trk{match.group(2)}"
+        return lags
+    member = {"aruba_cx": (re.compile(r"(?i)^lag (\d+)$"), "lag{}"),
+              "hpe_comware": (re.compile(r"(?i)^port link-aggregation group (\d+)$"), "Bridge-Aggregation{}")}
+    if platform not in member:
+        return lags
+    pattern, name = member[platform]
+    for match, body in _config_blocks(config or "", re.compile(r"^interface\s+(\S+)\s*$", re.I)):
+        group = next((found.group(1) for found in map(pattern.match, body) if found), None)
+        if group:
+            lags[interface_key(match.group(1))] = name.format(group)
+    return lags
+
+
 def _vlan_config_excerpt(config):
     """Keep only VLAN-related lines – the full configuration may contain secrets."""
     return "\n".join(line for line in clean_output(config).splitlines() if _VLAN_CONFIG_LINE.search(line))
@@ -826,8 +855,13 @@ def parse_stack(config, platform, interfaces=()):
 def build_snapshot(outputs, platform):
     interfaces = parse_interfaces(outputs["interfaces"], platform)
     vlans = parse_vlans(outputs.get("config", ""), platform)
+    lags = parse_lags(outputs.get("config", ""), platform)
     for interface in interfaces:
         interface["vlans"] = vlans.get(interface_key(interface["name"]))
+        interface["lag"] = lags.get(interface_key(interface["name"]))
+        if interface["lag"] and not interface["vlans"]:
+            # Aruba CX/Comware: the VLANs are configured on the LAG and apply to its member ports.
+            interface["vlans"] = vlans.get(interface_key(interface["lag"]))
     interface_ips = parse_interface_ips(outputs.get("ipv4_interfaces", ""), outputs.get("ipv6_interfaces", ""), platform)
     lldp_neighbors = parse_neighbors(outputs["neighbors"])
     cdp_neighbors = parse_cdp_neighbors(outputs.get("cdp_neighbors", ""))
@@ -1357,7 +1391,7 @@ def plan_switch_sync(nb, config, snapshot):
         "interfaces": [
             {"name": item["name"], "netbox_name": record.name if record else "", "method": method,
              "physical": _physical_interface(item), "owner_id": owners[item["name"]].id,
-             "vlan_label": vlan_label(without_vlans(item.get("vlans"), ignored_vlans(vlan_map)))}
+             "vlan_label": port_label(without_vlans(item.get("vlans"), ignored_vlans(vlan_map)), item.get("lag"))}
             for item in snapshot["interfaces"] if owners[item["name"]] is not None
             for record, method in [matches[item["name"]]]
         ],
@@ -1620,6 +1654,30 @@ def _sync_switch_stack(nb, device, members, dry_run, report):
         report["errors"].append(f"Switch-Stack (NetBox Utilities): {error}")
 
 
+def _sync_lag_members(snapshot, owners, records, dry_run, report):
+    """Assign member ports to their LAG interface (NetBox field ``lag``)."""
+    names = {interface_key(item["name"]): item["name"] for item in snapshot["interfaces"]}
+    for interface in snapshot["interfaces"]:
+        key, lag_key = interface_key(interface["name"]), interface_key(interface.get("lag") or "")
+        if not interface.get("lag") or key not in records or lag_key not in records:
+            continue
+        record, lag_record = records[key], records[lag_key]
+        owner, lag_owner = owners[interface["name"]], owners[names[lag_key]]
+        if owner.id != lag_owner.id:
+            # NetBox only allows a LAG of the same device (or virtual chassis).
+            report["notes"].append(f"Interface {interface['name']}: LAG {names[lag_key]} liegt auf {lag_owner.name} "
+                                   f"– nur im Label vermerkt")
+            continue
+        if record and lag_record and related_id(record, "lag") == lag_record.id:
+            continue
+        report["changes"].append(f"Interface {record.name if record else interface['name']}: LAG {names[lag_key]}")
+        if not dry_run and record and lag_record:
+            try:
+                record.update({"lag": lag_record.id})
+            except Exception as error:  # noqa: BLE001
+                report["errors"].append(f"Interface {interface['name']}: LAG {names[lag_key]}: {error}")
+
+
 def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=False, log=_noop):
     """Write a discovery snapshot to NetBox.
 
@@ -1659,7 +1717,7 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
         record, method = matches[interface["name"]]
         where = f" auf {owner.name}" if owner.id != device_id else ""
         port = dict(interface, vlans=without_vlans(interface.get("vlans"), ignored))
-        label = vlan_label(port["vlans"])
+        label = port_label(port["vlans"], interface.get("lag"))
         try:
             if record:
                 changes = {}
@@ -1707,6 +1765,8 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
             records[key] = record
         except Exception as error:  # noqa: BLE001
             report["errors"].append(f"Interface {interface['name']}: {error}")
+
+    _sync_lag_members(snapshot, owners, records, dry_run, report)
 
     for interface in snapshot["interfaces"]:
         key = interface_key(interface["name"])

@@ -5,8 +5,10 @@ from fake_netbox import Endpoint, FakeNetBox, Record
 from netbox_sync.core.switches import (
     build_snapshot,
     match_interfaces,
+    parse_lags,
     parse_stack,
     plan_switch_sync,
+    port_label,
     stack_member,
     sync_snapshot_to_netbox,
 )
@@ -401,3 +403,65 @@ def test_virtual_chassis_positions_are_suggested():
                                           virtual_chassis=SimpleNamespace(id=9), vc_position=2))
     plan = plan_switch_sync(nb, switch, snapshot)
     assert [entry["device_id"] for entry in plan["stack"]] == [1, 4]
+
+
+CX_LAG_BRIEF = """
+Port           Native  Mode   Type           Enabled Status  Reason                  Speed   Description
+1/1/1          1       trunk  10G-SR         yes     up                              10000   SOEM-E1
+1/1/2          1       trunk  10G-SR         yes     up                              10000   SOEM-E1
+1/1/23         120     access 1G-BT          yes     up                              1000    FritzBox
+lag1           1       trunk  --             yes     up      --                      20000   Etage 1 Uplink
+"""
+
+CX_LAG_CONFIG = """vlan 1
+vlan 100
+interface lag 1
+    no routing
+    vlan trunk native 1
+    vlan trunk allowed 100,110,120,201,209-213
+interface 1/1/1
+    no shutdown
+    lag 1
+interface 1/1/2
+    no shutdown
+    lag 1
+interface 1/1/23
+    no routing
+    vlan access 120
+"""
+
+
+def test_lags_are_parsed_for_all_platforms():
+    assert parse_lags(CX_LAG_CONFIG, "aruba_cx") == {"1/1/1": "lag1", "1/1/2": "lag1"}
+    assert parse_lags("trunk 49-50 trk1 lacp\ntrunk 1/A1-1/A2 Trk2 trunk\n", "aruba_aos") == {
+        "49": "Trk1", "50": "Trk1", "1/a1": "Trk2", "1/a2": "Trk2"}
+    comware = "interface GigabitEthernet1/0/49\n port link-aggregation group 3\n#\n"
+    assert parse_lags(comware, "hpe_comware") == {"ge1/0/49": "Bridge-Aggregation3"}
+
+
+def test_lag_members_take_the_lag_vlans_and_name_the_lag_in_the_label():
+    snapshot = build_snapshot({"interfaces": CX_LAG_BRIEF, "neighbors": "", "config": CX_LAG_CONFIG}, "aruba_cx")
+    ports = {item["name"]: item for item in snapshot["interfaces"]}
+    assert ports["1/1/1"]["lag"] == "lag1" and ports["1/1/23"]["lag"] is None
+    assert port_label(ports["1/1/1"]["vlans"], ports["1/1/1"]["lag"]) == "1,100,110,120,201,209-213 (LAG 1)"
+    assert port_label(ports["1/1/23"]["vlans"], ports["1/1/23"]["lag"]) == "120"
+    assert port_label(None, "Trk2") == "(LAG 2)"
+    assert len(port_label({"untagged": [], "tagged": list(range(2, 400, 2)), "tagged_all": False}, "lag1")) <= 64
+    assert "    lag 1" in snapshot["raw"]["vlan_config"]
+
+
+def test_lag_members_are_assigned_to_their_lag_in_netbox():
+    nb, switch, snapshot = _numbered_setup()
+    nb.dcim.interfaces.records.append(Record(nb.dcim.interfaces, id=30, name="lag1", device=SimpleNamespace(id=1),
+                                             type=SimpleNamespace(value="lag"), enabled=True, cable=None, label=""))
+    snapshot["interfaces"].append({"name": "lag1", "enabled": True, "connected": True, "ip_addresses": [],
+                                   "vlans": None})
+    for item in snapshot["interfaces"][:2]:
+        item["lag"] = "lag1"
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False, dry_run=True)
+    assert "Interface 1: LAG lag1" in report["changes"] and nb.dcim.interfaces.updates == []
+    sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False)
+    assert nb.dcim.interfaces.get(1).lag == 30 and nb.dcim.interfaces.get(1).label == "10 (LAG 1)"
+    assert not getattr(nb.dcim.interfaces.get(3), "lag", None)
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False, dry_run=True)
+    assert not any("LAG lag1" in change for change in report["changes"]), "already assigned"
