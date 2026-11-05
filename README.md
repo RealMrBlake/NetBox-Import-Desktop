@@ -115,6 +115,12 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
   never changed
 - The switch configuration is only changed when "Enable LLDP if needed" is
   explicitly switched on
+- One-off import without SSH ("Backup importieren …"): configuration backups
+  of D-Link DGS-1210 (`config.bin`) and Linksys LGS (`*.cfg` or the contained
+  `SNCSR.conf`) switches are read offline. Hostname, location, management IP,
+  port descriptions, admin state, untagged/tagged VLANs and VLAN names are
+  taken over; the switch is matched to the NetBox device by its hostname and
+  then synchronized like an SSH result (no LLDP neighbors, hence no cables)
 
 ### Sophos access points (CSV from Sophos Central)
 

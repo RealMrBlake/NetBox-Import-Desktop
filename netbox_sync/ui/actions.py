@@ -1,6 +1,7 @@
 """Long-running operations started from the UI. Everything here runs in background tasks."""
 
 import threading
+from pathlib import Path
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -8,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QFileDialog
 
-from netbox_sync.core import exchange, netbox
+from netbox_sync.core import backups, exchange, netbox
 from netbox_sync.core.client_sync import ClientSyncEngine
 from netbox_sync.core.clients import ClientScanError, expand_targets, new_row, query_ad, scan_clients
 from netbox_sync.core.config import known_hosts_path
@@ -328,6 +329,50 @@ class Actions:
         logger("switch").log(25, "%s", text)
         self.window.toast(text)
 
+    def import_switch_backups(self):
+        """One-off import of D-Link/Linksys configuration backups instead of SSH."""
+        if self.state.profile is None:
+            return
+        paths, _filter = QFileDialog.getOpenFileNames(self.window, "Switch-Backup importieren", "",
+                                                      backups.FILE_FILTER)
+        if not paths:
+            return
+        devices = {row["name"].casefold(): row for row in self.state.netbox_devices or []}
+        items, failures = [], []
+        for path in paths:
+            name = Path(path).name
+            try:
+                switch, snapshot = backups.parse_backup(Path(path).read_bytes(), name)
+            except (OSError, backups.BackupError) as error:
+                failures.append(f"{name}: {error}")
+                continue
+            switch["name"] = switch["name"] or Path(path).stem
+            device = devices.get(switch["name"].casefold())
+            items.append({"switch": {"name": device["name"] if device else switch["name"],
+                                     "device_id": device["id"] if device else None,
+                                     "platform": switch["platform"], "host": switch["host"], "port": 22},
+                          "snapshot": snapshot, "file": name})
+        if items:
+            snapshots, added = exchange.merge_switches(self.state.switches, items, lambda: uuid.uuid4().hex)
+            by_id = {switch["id"]: switch for switch in self.state.switches}
+            for switch_id, snapshot in snapshots.items():
+                self.state.switch_snapshots[switch_id] = snapshot
+                self.state.switch_status[switch_id] = ("ok", "aus Backup · " + describe_snapshot(snapshot))
+                stored = by_id.get(switch_id)
+                if stored and stored.get("platform", "auto") == "auto":
+                    stored["platform"] = snapshot["platform"]
+                    self.state.touch()
+            if added:
+                self.state.touch()
+            self.state.switches_changed.emit()
+            names = ", ".join(item["switch"]["name"] for item in items)
+            logger("switch").log(25, "Backup importiert: %s", names)
+            self.window.toast(f"{len(items)} Switch-Backup(s) geladen" + (f", {added} neu im Profil" if added else "")
+                              + " – jetzt „Nach NetBox übertragen“ wählen")
+        if failures:
+            widgets.message(self.window, "Nicht alle Backups gelesen",
+                            f"{len(items)} von {len(paths)} Datei(en) importiert.", "warning", "\n".join(failures))
+
     # ------------------------------------------------------------------
     # Switches
     # ------------------------------------------------------------------
@@ -358,7 +403,8 @@ class Actions:
                        on_error=self._netbox_failed)
 
     def discover_switches(self, switches):
-        switches = [dict(switch) for switch in switches if switch.get("enabled", True)]
+        switches = [dict(switch) for switch in switches if switch.get("enabled", True)
+                    and switch.get("platform") not in backups.BACKUP_PLATFORMS]
         if not switches:
             widgets.message(self.window, "Keine aktiven Switche", "Die ausgewählten Switche sind deaktiviert.", "info")
             return

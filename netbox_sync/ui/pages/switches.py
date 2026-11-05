@@ -4,6 +4,7 @@ import uuid
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QMenu, QSplitter, QStackedWidget
 
+from netbox_sync.core.backups import BACKUP_PLATFORMS
 from netbox_sync.core.switches import PLATFORMS, ignored_vlans, port_label, without_vlans
 from netbox_sync.ui import widgets
 from netbox_sync.ui.dialogs import AddSwitchesDialog, RawDataDialog, SwitchDialog
@@ -23,7 +24,8 @@ def _speed(value):
 class SwitchesPage(Page):
     title = "Switche"
     subtitle = ("Bestehende NetBox-Geräte per SSH auslesen und Schnittstellen, IP-Adressen und LLDP/CDP-Verkabelung "
-                "dokumentieren. Unterstützt Aruba CX, ArubaOS-Switch/ProCurve und HPE Comware.")
+                "dokumentieren. Unterstützt Aruba CX, ArubaOS-Switch/ProCurve und HPE Comware – D-Link und Linksys "
+                "per Backup-Datei.")
 
     def __init__(self, window):
         super().__init__(window)
@@ -36,7 +38,7 @@ class SwitchesPage(Page):
         self.discover_button = list_card.add_action(button("Auslesen", "play", "primary", on_click=self.discover))
         columns = [
             Column("name", "NetBox-Gerät", 200),
-            Column("platform", "Plattform", 180, value=lambda row: PLATFORMS.get(row.get("platform"), row.get("platform"))),
+            Column("platform", "Plattform", 180, value=lambda row: PLATFORMS.get(row.get("platform")) or BACKUP_PLATFORMS.get(row.get("platform"), row.get("platform"))),
             Column("host", "SSH-Host", 150, value=lambda row: f"{row.get('host', '')}:{row.get('port', 22)}"),
             Column("enabled", "Aktiv", 70, value=lambda row: "ja" if row.get("enabled", True) else "nein",
                    color=lambda row: None if row.get("enabled", True) else "text_faint"),
@@ -81,6 +83,11 @@ class SwitchesPage(Page):
         self.file_button = result_card.add_action(button("Aus Datei laden …", "folder", on_click=self.load_file,
                                                          tooltip="Ausleseergebnisse aus einer im Offline-Modus "
                                                                  "erstellten Exportdatei (JSON) laden."))
+        self.backup_button = result_card.add_action(button(
+            "Backup importieren …", "folder", on_click=self.actions.import_switch_backups,
+            tooltip="Einmal-Import ohne SSH: Konfigurations-Backup eines D-Link- (DGS-1210, config.bin) oder "
+                    "Linksys-Switches (LGS, *.cfg) laden. Der Switch wird über seinen Hostnamen dem NetBox-Gerät "
+                    "zugeordnet."))
         self.raw_button = result_card.add_action(button("SSH-Rohdaten", "terminal", on_click=self.show_raw))
         self.sync_button = result_card.add_action(button("Nach NetBox übertragen …", "upload", "primary",
                                                          on_click=self.sync))
@@ -282,6 +289,7 @@ class SwitchesPage(Page):
         widgets.set_enabled(self.remove_button, bool(targets), "Bitte Switche anhaken oder markieren.")
         self.add_button.setEnabled(not busy)
         self.file_button.setEnabled(not busy)
+        self.backup_button.setEnabled(not busy)
 
     def set_busy(self, busy):
         self._update_buttons()
