@@ -239,7 +239,7 @@ def parse_neighbors(output):
         local = _field(block, "Local Port")
         if not local:
             continue
-        port = re.match(r"(\d+)", local)
+        port = re.search(r"(\d+)", local)  # "Port 2" → "2", the name of the switch port
         neighbors.append({
             "local_port": port.group(1) if port else local,
             "system_name": _field(block, "System Name"),
@@ -304,3 +304,16 @@ def build_snapshot(outputs):
                    "location": _field(system, "Location"), "mac": mac,
                    "serial": _field(system, "Serial Number"), "firmware": _field(system, "Firmware Version")},
     }
+
+
+def reparse(snapshot):
+    """Rebuild a stored snapshot from its raw outputs with the current parsers.
+
+    Exchange files keep all LANCOM outputs, so parser fixes also apply to older exports.
+    """
+    raw = snapshot.get("raw") or {}
+    if snapshot.get("platform") != PLATFORM or not raw.get("status"):
+        return snapshot
+    rebuilt = build_snapshot(dict(raw, lldp_enabled_automatically=snapshot.get("lldp_enabled_automatically")))
+    rebuilt["discovered_at"] = snapshot.get("discovered_at", rebuilt["discovered_at"])
+    return rebuilt

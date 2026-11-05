@@ -267,3 +267,31 @@ def test_paging_is_answered_with_space():
     assert channel.sent == ["show", "<space>"]
     assert "RAM Size : 128" in output and "Flash Size : 32" in output
     assert "quit" not in output and "more" not in output
+
+
+def test_neighbor_on_named_local_port():
+    neighbors = """
+Local Port         : Port 2
+Chassis ID         : 00-a0-57-11-22-33
+Port ID            : LAN1
+System Name        : AP-005
+Management Address : 10.0.0.50 (IPv4)
+SW-08(lldp)#"""
+    snapshot = build_snapshot(dict(outputs(), neighbors=neighbors), "lancom_sx3")
+    port = next(item for item in snapshot["interfaces"] if item["name"] == "2")
+    assert port["neighbor"]["local_port"] == "2"
+    assert port["neighbor"]["system_name"] == "AP-005" and port["neighbor"]["remote_port"] == "LAN1"
+    assert port["neighbor"]["management_ip"] == "10.0.0.50"
+
+
+def test_reparse_fixes_older_exports():
+    neighbors = "Local Port : Port 2\nPort ID : LAN1\nSystem Name : AP-005\nSW-08(lldp)#"
+    snapshot = build_snapshot(dict(outputs(), neighbors=neighbors), "lancom_sx3")
+    snapshot["neighbors"][0]["local_port"] = "Port 2"  # as written by 4.16.3
+    for item in snapshot["interfaces"]:
+        item["neighbor"] = None
+    snapshot["discovered_at"] = 123
+    rebuilt = lancom.reparse(snapshot)
+    assert rebuilt["discovered_at"] == 123
+    assert next(item for item in rebuilt["interfaces"] if item["name"] == "2")["neighbor"]["system_name"] == "AP-005"
+    assert lancom.reparse({"platform": "aruba_cx", "raw": {}}) == {"platform": "aruba_cx", "raw": {}}

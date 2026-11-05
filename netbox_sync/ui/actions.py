@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QFileDialog
 
-from netbox_sync.core import backups, exchange, netbox
+from netbox_sync.core import backups, exchange, lancom, netbox
 from netbox_sync.core.client_sync import ClientSyncEngine
 from netbox_sync.core.clients import ClientScanError, expand_targets, new_row, query_ad, scan_clients
 from netbox_sync.core.config import known_hosts_path
@@ -320,6 +320,7 @@ class Actions:
             return
         snapshots, added = exchange.merge_switches(self.state.switches, data["switches"], lambda: uuid.uuid4().hex)
         for switch_id, snapshot in snapshots.items():
+            snapshot = lancom.reparse(snapshot)
             self.state.switch_snapshots[switch_id] = snapshot
             self.state.switch_status[switch_id] = ("ok", "aus Datei · " + describe_snapshot(snapshot))
         if added:
