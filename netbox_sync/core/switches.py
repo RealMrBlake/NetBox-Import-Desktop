@@ -175,8 +175,9 @@ def _read_available(channel, timeout=20, initialize_session=False):
     return output
 
 
-def _run_cli_command(channel, command, timeout=20):
-    channel.send(command + "\n")
+def _run_cli_command(channel, command, timeout=20, newline="\n"):
+    # LANCOM LCOS SX 3.x only executes a command on "\r" (like PuTTY's Enter); "\n" is just echoed.
+    channel.send(command + newline)
     try:
         return _read_available(channel, timeout=timeout)
     except TimeoutError as error:
@@ -261,7 +262,16 @@ def detect_platform(channel, banner):
     """Identify the switch OS from prompt and ``show version`` output."""
     if COMWARE_PROMPT.search(banner):
         return "hpe_comware"
-    _run_cli_command(channel, "no page")
+    try:
+        _run_cli_command(channel, "no page")
+    except TimeoutError:
+        # The command was only echoed: a CLI that needs "\r" as Enter (LANCOM LCOS SX 3.x).
+        from netbox_sync.core import lancom
+        channel.send("\r")
+        _read_available(channel, timeout=20)
+        if lancom.probe(channel):
+            return lancom.PLATFORM
+        raise
     version = _run_cli_command(channel, "show version", timeout=30)
     if re.search(r"(?i)ArubaOS-CX|AOS-CX|\b[A-Z]{2}\.10\.\d+", version):
         return "aruba_cx"
@@ -270,10 +280,7 @@ def detect_platform(channel, banner):
     if CLI_ERROR.search(version):
         # LANCOM LCOS SX 3.x has no "show version"; its system information is in the "system" mode.
         from netbox_sync.core import lancom
-        _run_cli_command(channel, "system")
-        system = _run_cli_command(channel, "show", timeout=30)
-        _run_cli_command(channel, "exit")
-        if lancom.is_lancom(system):
+        if lancom.probe(channel):
             return lancom.PLATFORM
     display = _run_cli_command(channel, "display version", timeout=30)
     if re.search(r"(?i)Comware", display):

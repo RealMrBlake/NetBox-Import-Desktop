@@ -104,6 +104,9 @@ class FakeChannel:
         self.sent, self.mode, self.buffer = [], "", ""
 
     def send(self, data):
+        if not data.endswith("\r"):
+            self.buffer += data  # like the real CLI: "\n" is only echoed, nothing is executed
+            return
         command = data.strip()
         self.sent.append(command)
         answers = {("system", "show"): SYSTEM, ("port", "show status"): STATUS,
@@ -178,3 +181,17 @@ def test_enable_lldp_on_disabled_ports():
     snapshot = build_snapshot(dict(outputs(), **result), "lancom_sx3")
     assert snapshot["lldp_enabled_automatically"] and not snapshot["lldp_disabled"]
     assert all(isinstance(value, str) for value in snapshot["raw"].values())
+
+
+def test_auto_detection_falls_back_to_carriage_return(monkeypatch):
+    from netbox_sync.core import switches
+
+    real = switches._read_available
+
+    def quick(channel, timeout=20, initialize_session=False):
+        return real(channel, timeout=min(timeout, 0.3), initialize_session=initialize_session)
+
+    monkeypatch.setattr(switches, "_read_available", quick)
+    channel = FakeChannel()
+    assert switches.detect_platform(channel, "SW-08# ") == "lancom_sx3"
+    assert channel.mode == ""

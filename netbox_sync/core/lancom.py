@@ -14,7 +14,7 @@ from netbox_sync.core.switches import (
     _interface,
     _compress_vlans,
     _membership,
-    _run_cli_command,
+    _run_cli_command as _run_with_newline,
     clean_output,
     parse_vlan_list,
 )
@@ -33,6 +33,19 @@ COMMANDS = (
     # "{ports}" becomes the port list from "show status", e.g. "1-26".
     ("lldp", "show info {ports}", "neighbors"),
 )
+
+
+def _run_cli_command(channel, command, timeout=20):
+    """This CLI executes a command only on "\r"; "\n" is just echoed."""
+    return _run_with_newline(channel, command, timeout=timeout, newline="\r")
+
+
+def probe(channel):
+    """``True`` when the "system" mode shows a LANCOM model; leaves the mode again."""
+    _run_cli_command(channel, "system")
+    system = _run_cli_command(channel, "show", timeout=30)
+    _run_cli_command(channel, "exit")
+    return is_lancom(system)
 
 
 def is_lancom(text):
