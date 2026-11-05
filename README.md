@@ -121,6 +121,9 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
   port descriptions, admin state, untagged/tagged VLANs and VLAN names are
   taken over; the switch is matched to the NetBox device by its hostname and
   then synchronized like an SSH result (no LLDP neighbors, hence no cables)
+  The D-Link `config.bin` is attached to the device unchanged (it contains the
+  switch's secrets as stored by the switch); the Linksys configuration is
+  attached as text with secrets removed
 
 ### Sophos access points (CSV from Sophos Central)
 

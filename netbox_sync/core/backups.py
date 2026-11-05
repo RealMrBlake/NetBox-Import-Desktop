@@ -14,6 +14,7 @@ Supported formats:
   A plain text ``SNCSR.conf`` is accepted as well.
 """
 
+import base64
 import io
 import ipaddress
 import re
@@ -44,7 +45,10 @@ def parse_backup(data, filename=""):
         data = data.encode("utf-8")
     dump = _dlink_dump(data)
     if dump is not None:
-        return _dlink_snapshot(dump, data)
+        switch, snapshot = _dlink_snapshot(dump, data)
+        # The original file is attached 1:1 so it can be restored on the switch.
+        snapshot["config_file"] = {"name": filename or "config.bin", "data": base64.b64encode(data).decode("ascii")}
+        return switch, snapshot
     text = _linksys_text(data)
     if text is not None:
         return _linksys_snapshot(text)

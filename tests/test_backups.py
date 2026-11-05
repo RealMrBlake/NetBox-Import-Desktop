@@ -130,3 +130,22 @@ def test_linksys_plain_text():
 def test_unknown_file():
     with pytest.raises(BackupError):
         parse_backup(b"hello world", "x.bin")
+
+
+def test_dlink_original_file_is_attached():
+    import base64
+    from types import SimpleNamespace
+
+    from netbox_sync.core.switches import _backup_config
+
+    data = dlink_backup()
+    _switch, snapshot = parse_backup(data, "config.bin")
+    created = []
+    attachments = SimpleNamespace(filter=lambda **_kw: [], create=lambda payload: created.append(payload)
+                                  or SimpleNamespace())
+    nb = SimpleNamespace(plugins=SimpleNamespace(netbox_attachments=SimpleNamespace(netbox_attachments=attachments)))
+    report = {"notes": [], "errors": [], "changes": []}
+    _backup_config(nb, SimpleNamespace(id=1, name="SW-01"), snapshot, False, report)
+    filename, stream, content_type = created[0]["file"]
+    assert filename.endswith(".bin") and content_type == "application/octet-stream"
+    assert stream.read() == data == base64.b64decode(snapshot["config_file"]["data"])

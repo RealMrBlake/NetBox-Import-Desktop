@@ -1,5 +1,6 @@
 """SSH discovery and NetBox synchronization for HPE and Aruba switches."""
 
+import base64
 import hashlib
 import io
 import ipaddress
@@ -1730,11 +1731,19 @@ def _backup_config(nb, device, snapshot, dry_run, report):
     A new attachment is only added when the configuration of this device changed
     since the last backup; the hash in the description identifies it.
     """
-    config = snapshot.get("config_backup")
-    if not config:
-        report["notes"].append("Konfigurations-Backup: keine Konfiguration ausgelesen")
-        return
-    digest = hashlib.sha256(f"{device.id}\n{config}".encode("utf-8")).hexdigest()[:16]
+    original = snapshot.get("config_file")
+    if original:
+        # Backup file from the switch's web UI (e.g. D-Link config.bin), attached unchanged.
+        content = base64.b64decode(original["data"])
+        extension = Path(original.get("name") or "config.bin").suffix or ".bin"
+        content_type = "application/octet-stream"
+    else:
+        config = snapshot.get("config_backup")
+        if not config:
+            report["notes"].append("Konfigurations-Backup: keine Konfiguration ausgelesen")
+            return
+        content, extension, content_type = config.encode("utf-8"), ".txt", "text/plain"
+    digest = hashlib.sha256(f"{device.id}\n".encode("utf-8") + content).hexdigest()[:16]
     try:
         app = nb.plugins.netbox_attachments
         known = [item for item in app.netbox_attachments.filter(q=digest)
@@ -1754,13 +1763,13 @@ def _backup_config(nb, device, snapshot, dry_run, report):
     report["changes"].append(f"Konfigurations-Backup: Anhang „{name}“")
     if dry_run:
         return
-    filename = re.sub(r"[^\w.-]+", "_", f"{device.name}_{stamp}") + ".txt"
+    filename = re.sub(r"[^\w.-]+", "_", f"{device.name}_{stamp}") + extension
     try:
         attachment = app.netbox_attachments.create({
             "name": name, "description": f"Running-Config, SHA-256 {digest}",
             # Older plugin versions keep the parent on the attachment itself.
             "object_type": "dcim.device", "object_id": device.id,
-            "file": (filename, io.BytesIO(config.encode("utf-8")), "text/plain"),
+            "file": (filename, io.BytesIO(content), content_type),
         })
         if hasattr(attachment, "assignments"):
             # Newer plugin versions assign attachments to objects separately.
