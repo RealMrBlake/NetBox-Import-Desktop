@@ -622,3 +622,21 @@ def test_skipped_cables_are_explained():
     switch["neighbor_devices"] = {"1/1/2": 0}  # "no cable" is chosen deliberately: no note
     report = sync_snapshot_to_netbox(nb, switch, snapshot, dry_run=True)
     assert not any("übersprungen" in note for note in report["notes"])
+
+
+def test_wireless_interfaces_are_no_cable_targets():
+    """LANCOM LW-600: eth1 plus wlan0/wlan1; LLDP reports "LAN1" – wlan1 must not make it ambiguous."""
+    nb, switch, snapshot = _numbered_setup()
+    nb.dcim.devices.records.append(Record(nb.dcim.devices, id=5, name="AP-005", tenant=SimpleNamespace(id=7)))
+    nb.dcim.interfaces.records += [
+        Record(nb.dcim.interfaces, id=50, name="eth1", device=SimpleNamespace(id=5), mac_address=None,
+               type=SimpleNamespace(value="1000base-t"), enabled=True, cable=None),
+        Record(nb.dcim.interfaces, id=51, name="wlan0", device=SimpleNamespace(id=5), mac_address=None,
+               type=SimpleNamespace(value="ieee802.11ax"), enabled=True, cable=None),
+        Record(nb.dcim.interfaces, id=52, name="wlan1", device=SimpleNamespace(id=5), mac_address=None,
+               type=SimpleNamespace(value="ieee802.11ax"), enabled=True, cable=None),
+    ]
+    snapshot["neighbors"][0].update(system_name="AP-005", remote_port="LAN1", port_description="LAN1")
+    report = sync_snapshot_to_netbox(nb, switch, snapshot)
+    assert report["errors"] == []
+    assert nb.dcim.cables.created[0]["b_terminations"] == [{"object_type": "dcim.interface", "object_id": 50}]

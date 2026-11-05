@@ -1095,6 +1095,14 @@ def _physical_record(record):
             and not re.match(r"^(?:vlan|lo|mgmt|oobm)", interface_key(record.name)))
 
 
+# NetBox does not allow cables on wireless interfaces (Wi-Fi, LTE/5G, Bluetooth …).
+_WIRELESS_TYPE = re.compile(r"^(?:ieee802\.1[15]|other-wireless|gsm|cdma|lte|4g|5g)")
+
+
+def _cableable_record(record):
+    return _physical_record(record) and not _WIRELESS_TYPE.match(_record_type(record))
+
+
 def _physical_interface(interface):
     return netbox_interface_type(interface) not in ("virtual", "lag")
 
@@ -1538,7 +1546,7 @@ class _RemoteLookup:
         number = _port_number(neighbor.get("remote_port"))
         if number is not None:
             found = [record for record in records.values()
-                     if _physical_record(record) and _port_number(record.name) == number]
+                     if _cableable_record(record) and _port_number(record.name) == number]
             if len(found) == 1:
                 return found[0]
         # Access points and phones often report their MAC address as port ID.
@@ -1550,7 +1558,7 @@ class _RemoteLookup:
                 return found[0]
         # An end device with a single port (e.g. an AP from the Sophos import) can only be cabled there.
         physical = [record for record in records.values()
-                    if _physical_record(record) and not getattr(record, "mgmt_only", False)]
+                    if _cableable_record(record) and not getattr(record, "mgmt_only", False)]
         return physical[0] if len(physical) == 1 else None
 
 
