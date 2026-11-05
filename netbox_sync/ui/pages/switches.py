@@ -109,15 +109,21 @@ class SwitchesPage(Page):
                                       tooltip="Hängt die laufende Konfiguration als Textdatei an das NetBox-Gerät "
                                               "(Plugin netbox-attachments). Passwörter, Schlüssel und Communities "
                                               "werden entfernt; ein neuer Anhang entsteht nur bei Änderungen.")
+        # Two rows: filters for the table, then the options of the NetBox transfer.
+        filters.setSpacing(12)
         filters.addWidget(self.search, 2)
         filters.addWidget(self.switch_filter, 1)
         filters.addWidget(self.only_up)
         filters.addWidget(self.only_neighbors)
-        filters.addStretch(1)
-        filters.addWidget(self.cables_option)
-        filters.addWidget(self.update_cables_option)
-        filters.addWidget(self.backup_option)
         result_card.add(filters)
+        options = QHBoxLayout()
+        options.setSpacing(16)
+        options.addWidget(label("Übertragen:", muted=True))
+        options.addWidget(self.cables_option)
+        options.addWidget(self.update_cables_option)
+        options.addWidget(self.backup_option)
+        options.addStretch(1)
+        result_card.add(options)
         result_columns = [
             Column("switch", "Switch", 140),
             Column("name", "Schnittstelle", 150),
