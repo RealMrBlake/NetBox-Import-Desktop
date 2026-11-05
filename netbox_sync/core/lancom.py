@@ -11,10 +11,10 @@ import time
 
 from netbox_sync.core.switches import (
     CLI_ERROR,
-    _interface,
+    CLI_PROMPT,
     _compress_vlans,
+    _interface,
     _membership,
-    _run_cli_command as _run_with_newline,
     clean_output,
     parse_vlan_list,
 )
@@ -35,9 +35,33 @@ COMMANDS = (
 )
 
 
+# The CLI pages long outputs ("-- more --, next page: Space, ..., q to quit") and cannot be told not to.
+PAGER = re.compile(r"(?im)^[^\n]*(?:q to quit|-+\s*more\s*-+)[^\n]*\Z")
+
+
 def _run_cli_command(channel, command, timeout=20):
-    """This CLI executes a command only on "\r"; "\n" is just echoed."""
-    return _run_with_newline(channel, command, timeout=timeout, newline="\r")
+    """Run a command; this CLI executes it only on "\r" ("\n" is just echoed).
+
+    Paging prompts are answered with Space and removed from the output.
+    """
+    channel.send(command + "\r")
+    chunks, started = [], time.monotonic()
+    while time.monotonic() - started < timeout:
+        if channel.recv_ready():
+            chunks.append(channel.recv(65535).decode("utf-8", errors="replace"))
+            text = clean_output("".join(chunks))
+            if PAGER.search(text):
+                chunks = [PAGER.sub("", text)]
+                channel.send(" ")
+                started = time.monotonic()  # every page gets the full timeout
+                continue
+            if CLI_PROMPT.search(text):
+                return text
+        time.sleep(0.05)
+    text = clean_output("".join(chunks))
+    tail = " | ".join(line.strip() for line in text.splitlines()[-3:] if line.strip())
+    raise TimeoutError(f"CLI-Befehl nicht vollständig abgeschlossen: {command}. Der Switch hat die CLI-Ausgabe nicht "
+                       f"mit einem vollständigen Prompt abgeschlossen. Letzte Ausgabe: {tail[-300:] or '–'}")
 
 
 def probe(channel):

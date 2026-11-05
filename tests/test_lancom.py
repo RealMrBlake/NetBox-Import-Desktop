@@ -214,6 +214,9 @@ def _quick_reads(monkeypatch):
     real = switches._read_available
     monkeypatch.setattr(switches, "_read_available", lambda channel, timeout=20, initialize_session=False:
                         real(channel, timeout=min(timeout, 0.3), initialize_session=initialize_session))
+    command = lancom._run_cli_command
+    monkeypatch.setattr(lancom, "_run_cli_command", lambda channel, text, timeout=20:
+                        command(channel, text, timeout=min(timeout, 0.3)))
     return switches
 
 
@@ -244,3 +247,23 @@ def test_session_is_attached_to_errors(monkeypatch):
     with pytest.raises(TimeoutError) as caught:
         switches.run_switch_commands({"host": "x", "platform": "lancom_sx3"})
     assert "SW-08#" in caught.value.transcript and "»» system" in caught.value.transcript
+
+
+def test_paging_is_answered_with_space():
+    class Paging(FakeChannel):
+        def send(self, data):
+            if data == " ":
+                self.sent.append("<space>")
+                self.buffer += "\r                    \rFlash Size : 32\nSW-08(system)# "
+            elif data.strip() == "show" and self.mode == "system":
+                self.sent.append("show")
+                self.buffer += "show\nModel Name : LANCOM GS-2326P+\nRAM Size : 128\n -- more --, next page: Space, q to quit"
+            else:
+                super().send(data)
+
+    channel = Paging()
+    channel.mode = "system"
+    output = lancom._run_cli_command(channel, "show", timeout=2)
+    assert channel.sent == ["show", "<space>"]
+    assert "RAM Size : 128" in output and "Flash Size : 32" in output
+    assert "quit" not in output and "more" not in output
