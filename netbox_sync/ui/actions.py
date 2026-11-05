@@ -413,7 +413,7 @@ class Actions:
         known_hosts = known_hosts_path()
 
         def work(ctx):
-            snapshots, failures = {}, {}
+            snapshots, failures, transcripts = {}, {}, {}
             ctx.progress(0, len(switches), "Verbinde …")
             with ThreadPoolExecutor(max_workers=min(parallel, len(switches))) as pool:
                 futures = {}
@@ -441,15 +441,22 @@ class Actions:
                                        "Stack-Mitglieder werden über den Stack-Master ausgelesen und können aus "
                                        "dem Profil entfernt werden.")
                         failures[switch["id"]] = problem
+                        if getattr(error, "transcript", ""):
+                            transcripts[switch["id"]] = error.transcript
                         ctx.log(f"{switch['name']}: {problem}", "error")
                     ctx.progress(done, len(switches), switch["name"])
                     if ctx.cancelled:
                         for pending in futures:
                             pending.cancel()
-            return snapshots, failures
+            return snapshots, failures, transcripts
 
         def success(result):
-            snapshots, failures = result
+            snapshots, failures, transcripts = result
+            for switch_id in snapshots:
+                self.state.switch_failed_raw.pop(switch_id, None)
+            for switch_id in failures:
+                self.state.switch_failed_raw.pop(switch_id, None)
+            self.state.switch_failed_raw.update(transcripts)
             by_id = {switch["id"]: switch for switch in self.state.switches}
             platform_updates = 0
             for switch_id, snapshot in snapshots.items():

@@ -48,6 +48,8 @@ class AppState(QObject):
         self.netbox_devices = None
         self.switch_snapshots = {}
         self.switch_status = {}
+        # CLI session of failed discoveries (switch id → masked text) for the raw data view.
+        self.switch_failed_raw = {}
         self.clients = []
         self.clients_loaded_at = None
         self.client_engine = None

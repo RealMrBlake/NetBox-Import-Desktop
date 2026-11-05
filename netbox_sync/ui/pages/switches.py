@@ -290,7 +290,8 @@ class SwitchesPage(Page):
             self.sync_button.setText(f"{len(with_data)} nach NetBox übertragen …" if with_data
                                      else "Nach NetBox übertragen …")
         self.cables_option.setVisible(not offline)
-        widgets.set_enabled(self.raw_button, bool(self.state.switch_snapshots), "Noch nichts ausgelesen.")
+        widgets.set_enabled(self.raw_button, bool(self.state.switch_snapshots or self.state.switch_failed_raw),
+                            "Noch nichts ausgelesen.")
         widgets.set_enabled(self.edit_button, len(self._selected()) == 1, "Bitte genau einen Switch markieren.")
         widgets.set_enabled(self.remove_button, bool(targets), "Bitte Switche anhaken oder markieren.")
         self.add_button.setEnabled(not busy)
@@ -349,6 +350,7 @@ class SwitchesPage(Page):
             if dialog.result.get("device_id") != current.get("device_id"):
                 self.state.switch_snapshots.pop(current["id"], None)
                 self.state.switch_status.pop(current["id"], None)
+                self.state.switch_failed_raw.pop(current["id"], None)
             self.state.touch()
             self.refresh()
 
@@ -366,6 +368,7 @@ class SwitchesPage(Page):
         for switch_id in ids:
             self.state.switch_snapshots.pop(switch_id, None)
             self.state.switch_status.pop(switch_id, None)
+            self.state.switch_failed_raw.pop(switch_id, None)
         self.state.touch()
         self.refresh()
 
@@ -395,7 +398,11 @@ class SwitchesPage(Page):
 
     def show_raw(self):
         by_id = {switch["id"]: switch for switch in self.state.switches}
-        items = [(by_id[key], snapshot) for key, snapshot in self.state.switch_snapshots.items() if key in by_id]
+        raw = dict(self.state.switch_snapshots)
+        # A failed discovery is newer than an older result: show its session up to the error.
+        for key, transcript in self.state.switch_failed_raw.items():
+            raw[key] = {"raw": {"session": transcript}, "failed": True}
+        items = [(by_id[key], snapshot) for key, snapshot in raw.items() if key in by_id]
         if not items:
             return
         selected = self._selected()
@@ -408,7 +415,8 @@ class SwitchesPage(Page):
         menu = QMenu(self)
         menu.addAction(icon("play", muted), "Auslesen", self.discover)
         menu.addAction(icon("pencil", muted), "Bearbeiten …", self.edit_switch)
-        if any(switch["id"] in self.state.switch_snapshots for switch in self._selected()):
+        if any(switch["id"] in self.state.switch_snapshots or switch["id"] in self.state.switch_failed_raw
+               for switch in self._selected()):
             menu.addAction(icon("terminal", muted), "SSH-Rohdaten …", self.show_raw)
         menu.addSeparator()
         menu.addAction(icon("trash", theme.color("danger")), "Entfernen", self.remove_switches)

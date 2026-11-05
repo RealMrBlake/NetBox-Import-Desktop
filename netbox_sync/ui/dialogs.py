@@ -1038,17 +1038,22 @@ class RawDataDialog(_Dialog):
     SECTIONS = {
         "interfaces": "Schnittstellen", "ipv4_interfaces": "IPv4", "ipv6_interfaces": "IPv6",
         "neighbors": "LLDP", "cdp_neighbors": "CDP", "vlan_config": "VLAN-Konfiguration", "lldp_status": "LLDP-Status",
+        # LANCOM LCOS SX 3.x
+        "system": "System", "status": "Port-Status", "port_config": "Port-Konfiguration", "vlans": "VLANs",
+        "vlan_ports": "VLAN-Ports", "ip": "IP", "lldp_config": "LLDP-Konfiguration",
+        "session": "Sitzung",
     }
 
     def __init__(self, parent, items, selected_id=None):
-        super().__init__(parent, "SSH-Rohdaten", "Unveränderte Ausgaben der Switch-CLI – hilfreich bei der Fehlersuche.",
-                         width=900)
+        super().__init__(parent, "SSH-Rohdaten", "Unveränderte Ausgaben der Switch-CLI – hilfreich bei der Fehlersuche. "
+                         "„Sitzung“ zeigt den kompletten Ablauf, bei Fehlern bis zum Abbruch.", width=900)
         self.resize(1040, 700)
         self.items = items
         top = QHBoxLayout()
         self.switch_combo = QComboBox()
-        for switch, _snapshot in items:
-            self.switch_combo.addItem(f"{switch['name']} ({switch['host']})", switch["id"])
+        for switch, snapshot in items:
+            suffix = " – abgebrochen" if snapshot.get("failed") else ""
+            self.switch_combo.addItem(f"{switch['name']} ({switch['host']}){suffix}", switch["id"])
         if selected_id:
             self.switch_combo.setCurrentIndex(max(0, self.switch_combo.findData(selected_id)))
         top.addWidget(self.switch_combo, 1)
@@ -1056,14 +1061,6 @@ class RawDataDialog(_Dialog):
         top.addWidget(button("Alles speichern …", "download", on_click=self.save_all))
         self.root.addLayout(top)
         self.tabs = QTabWidget()
-        self.editors = {}
-        for key, title in self.SECTIONS.items():
-            editor = QPlainTextEdit()
-            editor.setObjectName("LogView")
-            editor.setReadOnly(True)
-            editor.setLineWrapMode(QPlainTextEdit.NoWrap)
-            self.tabs.addTab(editor, title)
-            self.editors[key] = editor
         self.root.addWidget(self.tabs, 1)
         close = button("Schließen", variant="primary", on_click=self.accept)
         self.root.addWidget(close, 0, Qt.AlignRight)
@@ -1073,15 +1070,32 @@ class RawDataDialog(_Dialog):
     def _current(self):
         return self.items[max(0, self.switch_combo.currentIndex())]
 
+    @classmethod
+    def _sections(cls, raw):
+        """Known outputs in a fixed order, unknown ones after them, the session last."""
+        keys = [key for key in cls.SECTIONS if key != "session" and key in raw]
+        keys += sorted(key for key in raw if key not in cls.SECTIONS and isinstance(raw[key], str))
+        keys += ["session"] if "session" in raw else []
+        return [(key, cls.SECTIONS.get(key, key)) for key in keys] or [("", "Rohdaten")]
+
     def show_switch(self, *_args):
         _switch, snapshot = self._current()
         raw = snapshot.get("raw", {})
-        for key, editor in self.editors.items():
+        self.tabs.clear()
+        for key, title in self._sections(raw):
+            editor = QPlainTextEdit()
+            editor.setObjectName("LogView")
+            editor.setReadOnly(True)
+            editor.setLineWrapMode(QPlainTextEdit.NoWrap)
             editor.setPlainText(str(raw.get(key) or "(keine Ausgabe)"))
+            self.tabs.addTab(editor, title)
+        if snapshot.get("failed"):
+            self.tabs.setCurrentIndex(self.tabs.count() - 1)
 
     def copy_current(self):
         editor = self.tabs.currentWidget()
-        QGuiApplication.clipboard().setText(editor.toPlainText())
+        if editor is not None:
+            QGuiApplication.clipboard().setText(editor.toPlainText())
 
     def save_all(self):
         path, _filter = QFileDialog.getSaveFileName(self, "SSH-Rohdaten speichern", "ssh-rohdaten.txt", "Text (*.txt)")
@@ -1089,9 +1103,10 @@ class RawDataDialog(_Dialog):
             return
         sections = []
         for switch, snapshot in self.items:
-            sections.append(f"{'=' * 20} {switch['name']} ({switch['host']}) {'=' * 20}")
+            suffix = " (abgebrochen)" if snapshot.get("failed") else ""
+            sections.append(f"{'=' * 20} {switch['name']} ({switch['host']}){suffix} {'=' * 20}")
             raw = snapshot.get("raw", {})
-            for key, title in self.SECTIONS.items():
+            for key, title in self._sections(raw):
                 sections.extend((f"\n--- {title.upper()} ---", str(raw.get(key) or "(keine Ausgabe)")))
         with open(path, "w", encoding="utf-8") as stream:
             stream.write("\n".join(sections))

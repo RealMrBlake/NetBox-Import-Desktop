@@ -288,13 +288,54 @@ def detect_platform(channel, banner):
     raise RuntimeError("Plattform konnte nicht automatisch erkannt werden – bitte im Switch-Dialog manuell wählen.")
 
 
+class _SessionRecorder:
+    """Channel wrapper that records everything sent and received for the raw data view."""
+
+    def __init__(self, channel, session):
+        self._channel = channel
+        self._session = session
+
+    def send(self, data):
+        self._session.append(f"»» {data.strip()}\n" if data.strip() else "»» <Enter>\n")
+        return self._channel.send(data)
+
+    def recv(self, size):
+        data = self._channel.recv(size)
+        self._session.append(data.decode("utf-8", errors="replace"))
+        return data
+
+    def __getattr__(self, name):
+        return getattr(self._channel, name)
+
+
+def session_text(session):
+    """The recorded CLI session without passwords, keys and communities."""
+    return mask_config("".join(session))
+
+
 def run_switch_commands(config, enable_lldp=False, known_hosts=None, log=_noop):
+    """CLI outputs of a switch; ``outputs["session"]`` is the full recorded session.
+
+    On errors the session up to the failure is attached to the exception as
+    ``error.transcript`` so it can be shown as raw data.
+    """
+    session = []
+    try:
+        outputs = _run_switch_commands(config, enable_lldp, known_hosts, log, session)
+    except Exception as error:
+        error.transcript = session_text(session)
+        raise
+    outputs["session"] = session_text(session)
+    return outputs
+
+
+def _run_switch_commands(config, enable_lldp, known_hosts, log, session):
     platform = config.get("platform", "auto")
     if platform not in PLATFORMS:
         raise ValueError(f"Nicht unterstützte Switch-Plattform: {platform}")
     client = _open_client(config, known_hosts, log)
     try:
-        channel = client.invoke_shell(width=240, height=1000)
+        channel = _SessionRecorder(client.invoke_shell(width=240, height=1000), session)
         try:
             banner = _read_available(channel, timeout=45, initialize_session=True)
         except TimeoutError as error:

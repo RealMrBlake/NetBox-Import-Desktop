@@ -195,3 +195,52 @@ def test_auto_detection_falls_back_to_carriage_return(monkeypatch):
     channel = FakeChannel()
     assert switches.detect_platform(channel, "SW-08# ") == "lancom_sx3"
     assert channel.mode == ""
+
+
+class FakeClient:
+    def __init__(self, channel):
+        self.channel = channel
+
+    def invoke_shell(self, **_kwargs):
+        return self.channel
+
+    def close(self):
+        pass
+
+
+def _quick_reads(monkeypatch):
+    from netbox_sync.core import switches
+
+    real = switches._read_available
+    monkeypatch.setattr(switches, "_read_available", lambda channel, timeout=20, initialize_session=False:
+                        real(channel, timeout=min(timeout, 0.3), initialize_session=initialize_session))
+    return switches
+
+
+def test_session_is_recorded(monkeypatch):
+    switches = _quick_reads(monkeypatch)
+    channel = FakeChannel()
+    channel.buffer = "snmp community secret123\nSW-08# "
+    monkeypatch.setattr(switches, "_open_client", lambda *_args: FakeClient(channel))
+    outputs = switches.run_switch_commands({"host": "x", "platform": "lancom_sx3"})
+    assert "»» system" in outputs["session"] and "Model Name" in outputs["session"]
+    assert "secret123" not in outputs["session"]
+    assert "Sitzung" not in outputs  # only raw outputs, no UI titles
+    assert build_snapshot(outputs, "lancom_sx3")["raw"]["session"] == outputs["session"]
+
+
+def test_session_is_attached_to_errors(monkeypatch):
+    import pytest
+
+    switches = _quick_reads(monkeypatch)
+
+    class Silent(FakeChannel):
+        def send(self, data):
+            self.sent.append(data.strip())  # never answers with a prompt
+
+    channel = Silent()
+    channel.buffer = "SW-08# "
+    monkeypatch.setattr(switches, "_open_client", lambda *_args: FakeClient(channel))
+    with pytest.raises(TimeoutError) as caught:
+        switches.run_switch_commands({"host": "x", "platform": "lancom_sx3"})
+    assert "SW-08#" in caught.value.transcript and "»» system" in caught.value.transcript
