@@ -18,6 +18,7 @@ PLATFORMS = {
     "aruba_cx": "Aruba CX (AOS-CX)",
     "aruba_aos": "ArubaOS-Switch / ProCurve",
     "hpe_comware": "HPE Comware",
+    "lancom_sx3": "LANCOM LCOS SX 3.x (GS-23xx)",
 }
 
 COMMANDS = {
@@ -266,6 +267,14 @@ def detect_platform(channel, banner):
         return "aruba_cx"
     if re.search(r"(?i)Image stamp|ProCurve|\b[A-Z]{1,2}\.1[456]\.\d+", version):
         return "aruba_aos"
+    if CLI_ERROR.search(version):
+        # LANCOM LCOS SX 3.x has no "show version"; its system information is in the "system" mode.
+        from netbox_sync.core import lancom
+        _run_cli_command(channel, "system")
+        system = _run_cli_command(channel, "show", timeout=30)
+        _run_cli_command(channel, "exit")
+        if lancom.is_lancom(system):
+            return lancom.PLATFORM
     display = _run_cli_command(channel, "display version", timeout=30)
     if re.search(r"(?i)Comware", display):
         return "hpe_comware"
@@ -286,6 +295,10 @@ def run_switch_commands(config, enable_lldp=False, known_hosts=None, log=_noop):
         if platform == "auto":
             platform = detect_platform(channel, banner)
             log(f"{config.get('name', config['host'])}: Plattform erkannt – {PLATFORMS[platform]}")
+        if platform == "lancom_sx3":
+            from netbox_sync.core import lancom
+            return dict(lancom.run_commands(channel, log, config.get("name", config["host"]), enable_lldp),
+                        platform=platform)
         pager_command, interface_command, neighbor_command = COMMANDS[platform]
         _run_cli_command(channel, pager_command)
 
@@ -865,6 +878,9 @@ def parse_stack(config, platform, interfaces=()):
 
 
 def build_snapshot(outputs, platform):
+    if platform == "lancom_sx3":
+        from netbox_sync.core import lancom
+        return lancom.build_snapshot(outputs)
     interfaces = parse_interfaces(outputs["interfaces"], platform)
     vlans = parse_vlans(outputs.get("config", ""), platform)
     lags = parse_lags(outputs.get("config", ""), platform)
@@ -932,6 +948,8 @@ def suggest_platform(*texts):
     text = " ".join(str(value or "") for value in texts).casefold()
     if not text.strip():
         return "auto"
+    if re.search(r"lancom|\bgs-23\d\d", text):
+        return "lancom_sx3"
     if re.search(r"comware|h3c|\b(?:19[0-9]0|51[234]0|55[01]0|57[01]0|59[0-9]0|75\d\d|10500|12500|12900)\b", text):
         return "hpe_comware"
     if re.search(r"aos-?cx|arubaos-?cx|\bcx\b|\b(?:4100i|6000|6100|6200[fm]?|6300[fm]?|6400|8100|8320|8325|8360|8400|9300|10000)\b", text):

@@ -24,7 +24,7 @@ def _speed(value):
 class SwitchesPage(Page):
     title = "Switche"
     subtitle = ("Bestehende NetBox-Geräte per SSH auslesen und Schnittstellen, IP-Adressen und LLDP/CDP-Verkabelung "
-                "dokumentieren. Unterstützt Aruba CX, ArubaOS-Switch/ProCurve und HPE Comware – D-Link und Linksys "
+                "dokumentieren. Unterstützt Aruba CX, ArubaOS-Switch/ProCurve, HPE Comware und LANCOM LCOS SX 3.x – D-Link und Linksys "
                 "per Backup-Datei.")
 
     def __init__(self, window):

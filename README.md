@@ -115,6 +115,12 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
   never changed
 - The switch configuration is only changed when "Enable LLDP if needed" is
   explicitly switched on
+- LANCOM switches with the mode-based LCOS SX 3.x CLI (e.g. GS-2326P+) are read
+  over SSH: `system`, `port`, `vlan`, `ip` and `lldp` modes with their `show`
+  commands. Untagged/tagged VLANs follow the egress rule (Access, Hybrid = PVID
+  untagged, Trunk). There is no running-config; the collected outputs are
+  attached as backup. "Enable LLDP if needed" switches ports whose LLDP mode is
+  Disabled/Tx only to `enable` (not saved) and waits one LLDP interval
 - One-off import without SSH ("Backup importieren …"): configuration backups
   of D-Link DGS-1210 (`config.bin`) and Linksys LGS (`*.cfg` or the contained
   `SNCSR.conf`) switches are read offline. Hostname, location, management IP,
