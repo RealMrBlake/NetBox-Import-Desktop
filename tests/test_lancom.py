@@ -295,3 +295,47 @@ def test_reparse_fixes_older_exports():
     assert rebuilt["discovered_at"] == 123
     assert next(item for item in rebuilt["interfaces"] if item["name"] == "2")["neighbor"]["system_name"] == "AP-005"
     assert lancom.reparse({"platform": "aruba_cx", "raw": {}}) == {"platform": "aruba_cx", "raw": {}}
+
+
+# Real "show info" layout: lower-case "Local port", empty values and lines indented after a paging prompt.
+REAL_NEIGHBORS = """show info 1-26
+Local port          : Port 2
+Chassis ID          : 00-A0-57-00-00-01
+Port ID             : LAN1
+Port Description    : LAN1
+System Name         : AP-005
+Management Address  : 10.0.0.22 (IPv4)
+Management Address  : fe80::1 (IPv6)
+
+Local port          : Port 12
+Chassis ID          : PC-020
+Port ID             : C4-EF-BB-00-00-01
+Port Description    : 
+System Name         : 
+System Description  : 
+
+Local port          : Port 25
+Chassis ID          : MikroTik
+                    Port ID             : bridge/ether1
+Port Description    :  
+System Name         :  
+                    System Description  : 6.49.17 (stable) MikroTik
+Management Address  : 192.168.88.3 (IPv4)
+
+SW-08(lldp)# """
+
+
+def test_real_neighbor_layout():
+    neighbors = lancom.parse_neighbors(REAL_NEIGHBORS)
+    assert [(item["local_port"], item["system_name"], item["remote_port"]) for item in neighbors] == [
+        ("2", "AP-005", "LAN1"), ("12", "PC-020", "C4-EF-BB-00-00-01"), ("25", "MikroTik", "bridge/ether1")]
+    assert neighbors[0]["management_ip"] == "10.0.0.22" and neighbors[1]["port_description"] == ""
+
+
+def test_prompt_is_no_port_description():
+    config = PORT_CONFIG.replace("25    Enabled  SFP_Auto_AMS  Disabled      9600        Discard    Disabled\n\n",
+                                 "25    Enabled  SFP_Auto_AMS  Disabled      9600        Discard    Disabled\n")
+    ports = lancom.parse_port_config(config.replace("\nSW-08(port)#", "\n\nSW-08(port)#"))
+    assert ports[25]["description"] == "" and ports[1]["description"] == "Uplink"
+    ports = lancom.parse_port_config("26    Enabled  Auto  Disabled  9600  Discard  Disabled\n\n\nSW-08(port)# ")
+    assert ports[26]["description"] == ""

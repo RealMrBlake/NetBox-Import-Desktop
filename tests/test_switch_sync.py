@@ -612,3 +612,13 @@ def test_vlans_of_another_site_are_only_labelled():
     assert [note for note in report["notes"] if "VLAN 10" in note] == [
         "VLAN 10 „MOBILE“ gehört zu einem anderen Standort als access-01 – nur im Label vermerkt, nicht am Port "
         "zugewiesen (VLAN global machen, um es zuzuweisen)"]
+
+
+def test_skipped_cables_are_explained():
+    nb, switch, snapshot = _numbered_setup()
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, dry_run=True)
+    assert report["cables_created"] == 0
+    assert any("nicht in NetBox gefunden" in note for note in report["notes"])
+    switch["neighbor_devices"] = {"1/1/2": 0}  # "no cable" is chosen deliberately: no note
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, dry_run=True)
+    assert not any("übersprungen" in note for note in report["notes"])

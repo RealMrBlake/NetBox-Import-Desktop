@@ -12,6 +12,7 @@ import time
 from netbox_sync.core.switches import (
     CLI_ERROR,
     CLI_PROMPT,
+    MAC_PATTERN,
     _compress_vlans,
     _interface,
     _membership,
@@ -120,7 +121,9 @@ def run_commands(channel, log=lambda *_args: None, name="", enable_lldp=False, w
 
 
 def _field(text, label):
-    match = re.search(rf"(?im)^{re.escape(label)}\s*:\s*(.*?)\s*$", text or "")
+    # Only spaces/tabs around the colon: an empty value must not swallow the next line. Lines after a
+    # paging prompt are indented, hence the optional leading blanks.
+    match = re.search(rf"(?im)^[ \t]*{re.escape(label)}[ \t]*:[ \t]*(.*?)[ \t]*$", text or "")
     return match.group(1) if match else ""
 
 
@@ -148,17 +151,17 @@ def parse_status(output):
 
 
 def parse_port_config(output):
-    """``show configuration``: a port line followed by its description line."""
+    """``show configuration``: a port line, directly followed by its (possibly empty) description line."""
     ports, current = {}, None
     for line in clean_output(output).splitlines():
         match = re.match(r"^\s*(\d+)\s+(Enabled|Disabled)\s", line, re.I)
         if match:
             current = int(match.group(1))
             ports[current] = {"enabled": match.group(2).lower() == "enabled", "description": ""}
-        elif current is not None and line.strip() and not set(line.strip()) <= {"-"}:
-            ports[current]["description"] = line.strip()
-            current = None
-        elif current is not None and set(line.strip()) <= {"-"} and line.strip():
+        elif current is not None:
+            text = line.strip()
+            if text and not set(text) <= {"-"} and not CLI_PROMPT.search(text):
+                ports[current]["description"] = text
             current = None
     return ports
 
@@ -240,14 +243,18 @@ def parse_neighbors(output):
         if not local:
             continue
         port = re.search(r"(\d+)", local)  # "Port 2" → "2", the name of the switch port
+        chassis = _field(block, "Chassis ID")
+        name = _field(block, "System Name")
+        if not name and chassis and not MAC_PATTERN.fullmatch(chassis) and not re.fullmatch(r"[\d.]+", chassis):
+            name = chassis  # e.g. Windows hosts send their name only as chassis ID
         neighbors.append({
             "local_port": port.group(1) if port else local,
-            "system_name": _field(block, "System Name"),
+            "system_name": name,
             "remote_port": _field(block, "Port ID") or _field(block, "Port Description"),
             "port_description": _field(block, "Port Description"),
             "management_ip": (re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", _field(block, "Management Address"))
                               or [""])[0],
-            "chassis_id": _field(block, "Chassis ID"),
+            "chassis_id": chassis,
             "protocol": "LLDP",
         })
     return neighbors

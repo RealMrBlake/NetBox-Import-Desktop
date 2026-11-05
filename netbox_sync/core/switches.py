@@ -2031,21 +2031,35 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
         lookup = _RemoteLookup(nb)
         manual_devices = config.get("neighbor_devices") or {}
         for neighbor in snapshot["neighbors"]:
-            label = f"{neighbor.get('local_port')} → {neighbor.get('system_name')} {neighbor.get('remote_port')}"
+            name = neighbor.get("system_name") or neighbor.get("management_ip") or neighbor.get("chassis_id") or "?"
+            label = f"{neighbor.get('local_port')} → {name} {neighbor.get('remote_port') or ''}".strip()
+
+            def skip(reason):
+                report["cables_skipped"] += 1
+                report["notes"].append(f"Kabel {device.name} {label} übersprungen: {reason}")
+
             try:
                 key = interface_key(neighbor["local_port"])
                 if key not in records:
+                    skip(f"lokaler Port „{neighbor['local_port']}“ gehört zu keiner Schnittstelle")
                     continue
                 local = records[key]
+                if local is None:  # interface only created by this (dry) run
+                    if not dry_run:
+                        skip("lokale Schnittstelle wurde nicht angelegt")
+                        continue
                 existing = getattr(local, "cable", None) if local is not None else None
                 if neighbor["local_port"] in manual_devices:
                     # 0 means "no device" was chosen in the review dialog.
                     chosen = int(manual_devices[neighbor["local_port"]] or 0)
-                    remote_device = nb.dcim.devices.get(chosen) if chosen else None
+                    if not chosen:
+                        report["cables_skipped"] += 1  # deliberately "no cable"
+                        continue
+                    remote_device = nb.dcim.devices.get(chosen)
                 else:
                     remote_device = lookup.device(neighbor)
                 if not remote_device:
-                    report["cables_skipped"] += 1
+                    skip("Nachbargerät nicht in NetBox gefunden – bei Bedarf im Reiter „Nachbarn“ zuordnen")
                     continue
                 if remote_device.id in own_devices:
                     continue
@@ -2054,10 +2068,15 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
                     if remote:
                         _check_cable(nb, local, remote, f"{device.name} {label}", update_cables, dry_run, report)
                     else:
-                        report["cables_skipped"] += 1
+                        skip(f"lokaler Port hat bereits ein Kabel, Schnittstelle „{neighbor.get('remote_port')}“ "
+                             f"auf {remote_device.name} nicht gefunden")
                     continue
-                if not remote or getattr(remote, "cable", None):
-                    report["cables_skipped"] += 1
+                if not remote:
+                    skip(f"keine passende Schnittstelle „{neighbor.get('remote_port')}“ auf {remote_device.name} "
+                         "(Name, Portnummer, MAC oder einziger physischer Port)")
+                    continue
+                if getattr(remote, "cable", None):
+                    skip(f"{remote_device.name} {remote.name} hat bereits ein Kabel")
                     continue
                 report["cables_created"] += 1
                 report["changes"].append(f"Kabel {device.name} {label}")
