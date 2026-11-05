@@ -619,7 +619,10 @@ class SwitchMappingDialog(_Dialog):
 
     NEW = "\x00new"
 
-    def __init__(self, parent, plans, create_cables):
+    def __init__(self, parent, plans, create_cables, interface_loader=None):
+        # interface_loader(device_id) → cable targets of another chosen neighbor device.
+        self.interface_loader = interface_loader
+        self._far_end_cache = {}
         super().__init__(parent, "Zuordnung prüfen",
                          "Schnittstellen, Nachbarn, Netze und VLANs prüfen und bei Bedarf korrigieren. Neue Objekte "
                          "erhalten immer den Mandanten des Switches – die Auswahl wird im Profil gespeichert.",
@@ -716,9 +719,9 @@ class SwitchMappingDialog(_Dialog):
                 "Für jeden Nachbarn kann ein bestehendes NetBox-Gerät gewählt werden (Auswahl aus: "
                 f"{', '.join(scopes)}). Die Gegenstelle wird über den Portnamen gesucht; „kein Kabel“ "
                 "überspringt den Nachbarn.", muted=True, wrap=True))
-            self.neighbor_table = QTableWidget(0, 5)
+            self.neighbor_table = QTableWidget(0, 6)
             self.neighbor_table.setHorizontalHeaderLabels(["Switch", "Lokaler Port", "Nachbar (LLDP/CDP)",
-                                                           "Nachbar-Port", "NetBox-Gerät"])
+                                                           "Nachbar-Port", "NetBox-Gerät", "Nachbar-Schnittstelle"])
             for switch, plan in plans:
                 for neighbor in plan["neighbors"]:
                     row = self.neighbor_table.rowCount()
@@ -727,14 +730,22 @@ class SwitchMappingDialog(_Dialog):
                     combo.set_items([("– kein Kabel –", 0)] + [(device["name"], device["id"]) for device in plan["devices"]],
                                     neighbor.get("device_id") or 0)
                     texts = (switch["name"], neighbor["local_port"], neighbor.get("system_name") or
-                             neighbor.get("management_ip") or "", neighbor.get("remote_port") or "")
+                             neighbor.get("management_ip") or neighbor.get("chassis_id") or "",
+                             neighbor.get("remote_port") or "")
                     for column, text in enumerate(texts):
                         self.neighbor_table.setItem(row, column, QTableWidgetItem(text))
                     self.neighbor_table.setCellWidget(row, 4, combo)
-                    self.neighbor_rows.append((switch, neighbor, combo))
-            self._prepare_table(self.neighbor_table, (140, 110, 220, 150, 260))
+                    port_combo = SearchableComboBox("Schnittstelle suchen …")
+                    self._fill_far_ends(port_combo, neighbor.get("interfaces") or [],
+                                        neighbor.get("suggested_interface"), neighbor.get("interface_id"))
+                    self.neighbor_table.setCellWidget(row, 5, port_combo)
+                    combo.currentIndexChanged.connect(
+                        lambda _index, device_combo=combo, target=port_combo, item=neighbor:
+                        self._device_changed(device_combo, target, item))
+                    self.neighbor_rows.append((switch, neighbor, combo, port_combo))
+            self._prepare_table(self.neighbor_table, (130, 95, 200, 140, 220, 220))
             neighbor_layout.addWidget(self.neighbor_table, 1)
-            found = sum(1 for _switch, neighbor, _combo in self.neighbor_rows if neighbor.get("device_id"))
+            found = sum(1 for _switch, neighbor, *_combos in self.neighbor_rows if neighbor.get("device_id"))
             tabs.addTab(neighbor_page, f"Nachbarn ({found} von {len(self.neighbor_rows)} zugeordnet)")
 
         # Networks --------------------------------------------------------------
@@ -959,13 +970,43 @@ class SwitchMappingDialog(_Dialog):
             status.setCheckState(Qt.Checked if create is not False else Qt.Unchecked)
         status.setForeground(QColor(theme.color("warning")))
 
+    @staticmethod
+    def _fill_far_ends(combo, interfaces, suggested=None, current=None, evaluated=True):
+        """"automatic" (with the interface it would pick) plus the cable targets of the device.
+
+        ``evaluated`` is False for a device chosen in the dialog: its automatic match is only known at sync time.
+        """
+        automatic = f"automatisch ({suggested})" if suggested else (
+            "automatisch – keine passende gefunden" if interfaces and evaluated else "automatisch")
+        items = [(automatic, 0)] + [(item["name"] + (" (hat Kabel)" if item.get("cabled") else ""), item["id"])
+                                    for item in interfaces]
+        combo.set_items(items, current or 0)
+        combo.setEnabled(bool(interfaces) or bool(suggested))
+
+    def _device_changed(self, device_combo, target, neighbor):
+        device_id = int(device_combo.valid_data() or 0)
+        if not device_id:
+            self._fill_far_ends(target, [])
+            return
+        if device_id == (neighbor.get("device_id") or 0):
+            self._fill_far_ends(target, neighbor.get("interfaces") or [], neighbor.get("suggested_interface"),
+                                neighbor.get("interface_id"))
+            return
+        if device_id not in self._far_end_cache:
+            try:
+                self._far_end_cache[device_id] = self.interface_loader(device_id) if self.interface_loader else []
+            except Exception:  # noqa: BLE001 – the choice stays "automatic"
+                self._far_end_cache[device_id] = []
+        self._fill_far_ends(target, self._far_end_cache[device_id], evaluated=False)
+
     def _filter_interfaces(self, only_unclear):
         for row, _switch, item, _combo in self.interface_rows:
             self.interface_table.setRowHidden(row, only_unclear and item["method"] == "name")
 
     def accept(self):
         result = {switch["id"]: {"interface_map": dict(switch.get("interface_map") or {}),
-                                 "neighbor_devices": dict(switch.get("neighbor_devices") or {})}
+                                 "neighbor_devices": dict(switch.get("neighbor_devices") or {}),
+                                 "neighbor_interfaces": dict(switch.get("neighbor_interfaces") or {})}
                   for switch, _plan in self.plans}
         # Members moved to another device: their port choices refer to the old
         # device and are dropped, so the ports are matched again automatically.
@@ -996,7 +1037,7 @@ class SwitchMappingDialog(_Dialog):
                 mapping.pop(item["name"], None)
             else:
                 mapping[item["name"]] = target
-        for switch, neighbor, combo in self.neighbor_rows:
+        for switch, neighbor, combo, port_combo in self.neighbor_rows:
             chosen = combo.valid_data()
             chosen = int(chosen or 0)
             stored = result[switch["id"]]["neighbor_devices"]
@@ -1004,6 +1045,13 @@ class SwitchMappingDialog(_Dialog):
                 stored.pop(neighbor["local_port"], None)
             else:
                 stored[neighbor["local_port"]] = chosen
+            # 0 = automatic (name, port number, MAC or single port); otherwise the chosen NetBox interface.
+            interface_id = int(port_combo.valid_data() or 0) if chosen else 0
+            interfaces = result[switch["id"]]["neighbor_interfaces"]
+            if interface_id:
+                interfaces[neighbor["local_port"]] = interface_id
+            else:
+                interfaces.pop(neighbor["local_port"], None)
         network_map = dict(self.previous_network_map)
         for item, combo, status in self.network_rows:
             chosen = combo.currentData()

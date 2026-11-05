@@ -640,3 +640,42 @@ def test_wireless_interfaces_are_no_cable_targets():
     report = sync_snapshot_to_netbox(nb, switch, snapshot)
     assert report["errors"] == []
     assert nb.dcim.cables.created[0]["b_terminations"] == [{"object_type": "dcim.interface", "object_id": 50}]
+
+
+def _ap_with_two_ports():
+    nb, switch, snapshot = _numbered_setup()
+    nb.dcim.devices.records.append(Record(nb.dcim.devices, id=5, name="AP-005", tenant=SimpleNamespace(id=7)))
+    nb.dcim.interfaces.records += [
+        Record(nb.dcim.interfaces, id=50, name="eth1", device=SimpleNamespace(id=5), mac_address=None,
+               type=SimpleNamespace(value="1000base-t"), enabled=True, cable=None),
+        Record(nb.dcim.interfaces, id=51, name="eth2", device=SimpleNamespace(id=5), mac_address=None,
+               type=SimpleNamespace(value="1000base-t"), enabled=True, cable=None),
+        Record(nb.dcim.interfaces, id=52, name="wlan0", device=SimpleNamespace(id=5), mac_address=None,
+               type=SimpleNamespace(value="ieee802.11ax"), enabled=True, cable=None),
+    ]
+    snapshot["neighbors"][0].update(system_name="AP-005", remote_port="Uplink", port_description="")
+    return nb, switch, snapshot
+
+
+def test_far_end_interface_can_be_chosen():
+    nb, switch, snapshot = _ap_with_two_ports()
+    plan = plan_switch_sync(nb, switch, snapshot)
+    neighbor = plan["neighbors"][0]
+    assert [item["name"] for item in neighbor["interfaces"]] == ["eth1", "eth2"]  # no Wi-Fi
+    assert neighbor["suggested_interface"] is None and neighbor["interface_id"] is None
+
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, dry_run=True)
+    assert report["cables_created"] == 0 and any("keine passende Schnittstelle" in n for n in report["notes"])
+
+    switch["neighbor_interfaces"] = {"1/1/2": 51}
+    assert plan_switch_sync(nb, switch, snapshot)["neighbors"][0]["interface_id"] == 51
+    sync_snapshot_to_netbox(nb, switch, snapshot)
+    assert nb.dcim.cables.created[0]["b_terminations"] == [{"object_type": "dcim.interface", "object_id": 51}]
+
+
+def test_chosen_interface_of_another_device_is_ignored():
+    nb, switch, snapshot = _ap_with_two_ports()
+    switch["neighbor_interfaces"] = {"1/1/2": 20}  # belongs to server-01, not AP-005
+    assert plan_switch_sync(nb, switch, snapshot)["neighbors"][0]["interface_id"] is None
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, dry_run=True)
+    assert report["cables_created"] == 0

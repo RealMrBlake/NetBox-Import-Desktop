@@ -1428,7 +1428,15 @@ def plan_switch_sync(nb, config, snapshot):
         if remote and remote.id not in known and remote.id != device.id:
             devices.append({"id": remote.id, "name": remote.name})
             known.add(remote.id)
-        neighbors.append(dict(neighbor, device_id=device_id, method=method))
+        interfaces, suggested, chosen = [], None, None
+        if remote:
+            interfaces = cable_targets(nb, remote.id, lookup)
+            found = lookup.interface(remote, neighbor)
+            suggested = found.name if found else None
+            stored = (config.get("neighbor_interfaces") or {}).get(local)
+            chosen = stored if any(item["id"] == stored for item in interfaces) else None
+        neighbors.append(dict(neighbor, device_id=device_id, method=method, interfaces=interfaces,
+                              suggested_interface=suggested, interface_id=chosen))
     # Stack members may be chosen from the same list (including the switch itself).
     for member_device in ([device, *filter(None, members.values())] if members else []):
         if member_device.id not in known:
@@ -1531,10 +1539,13 @@ class _RemoteLookup:
         self.devices[cache_key] = found
         return found
 
+    def records(self, device_id):
+        if device_id not in self.interfaces:
+            self.interfaces[device_id] = _device_interfaces(self.nb, device_id)
+        return self.interfaces[device_id]
+
     def interface(self, device, neighbor):
-        if device.id not in self.interfaces:
-            self.interfaces[device.id] = _device_interfaces(self.nb, device.id)
-        records = self.interfaces[device.id]
+        records = self.records(device.id)
         candidates = [neighbor.get("remote_port"), neighbor.get("port_description")]
         if neighbor.get("port_description"):
             candidates.append(neighbor["port_description"].split()[0])
@@ -1560,6 +1571,14 @@ class _RemoteLookup:
         physical = [record for record in records.values()
                     if _cableable_record(record) and not getattr(record, "mgmt_only", False)]
         return physical[0] if len(physical) == 1 else None
+
+
+def cable_targets(nb, device_id, lookup=None):
+    """Interfaces of a device a cable can end on, as ``[{"id", "name", "cabled"}]`` in natural order."""
+    records = (lookup or _RemoteLookup(nb)).records(device_id)
+    return [{"id": record.id, "name": record.name, "cabled": bool(getattr(record, "cable", None))}
+            for record in sorted(records.values(), key=lambda item: _natural_key(item.name))
+            if _cableable_record(record)]
 
 
 _NEW = "new"  # placeholder ID of objects a dry run would create
@@ -2038,6 +2057,7 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
     if create_cables:
         lookup = _RemoteLookup(nb)
         manual_devices = config.get("neighbor_devices") or {}
+        manual_interfaces = config.get("neighbor_interfaces") or {}
         for neighbor in snapshot["neighbors"]:
             name = neighbor.get("system_name") or neighbor.get("management_ip") or neighbor.get("chassis_id") or "?"
             label = f"{neighbor.get('local_port')} → {name} {neighbor.get('remote_port') or ''}".strip()
@@ -2071,7 +2091,11 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
                     continue
                 if remote_device.id in own_devices:
                     continue
-                remote = lookup.interface(remote_device, neighbor)
+                # A far-end interface chosen in the review dialog wins – as long as it belongs to the device.
+                chosen_interface = manual_interfaces.get(neighbor["local_port"])
+                remote = next((record for record in lookup.records(remote_device.id).values()
+                               if chosen_interface and record.id == chosen_interface), None)
+                remote = remote or lookup.interface(remote_device, neighbor)
                 if existing:
                     if remote:
                         _check_cable(nb, local, remote, f"{device.name} {label}", update_cables, dry_run, report)

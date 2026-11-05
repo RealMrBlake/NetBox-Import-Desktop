@@ -106,7 +106,11 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
   assignments) are supported; without the plugin the step is skipped with a note
 - Cables from LLDP/CDP, also with FQDN system names or via the management IP.
   Neighbors that report their MAC address as port ID (e.g. access points) are
-  matched by MAC, and a device with a single physical port is cabled there
+  matched by MAC, and a device with a single physical port is cabled there.
+  Wireless interfaces (Wi-Fi, LTE …) are never cable targets. In the review
+  dialog the far-end interface can be chosen per neighbor ("automatisch" shows
+  the interface that would be used); the choice is stored in the profile.
+  Every skipped cable is listed as a note with its reason
 - Existing cables are checked against LLDP/CDP: a different far end is reported
   as a note. Only with the optional "Bestehende Kabel anpassen" (confirmed with
   a warning, NetBox is the source of truth) the cable is moved to the reported

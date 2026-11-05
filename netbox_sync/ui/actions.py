@@ -16,6 +16,7 @@ from netbox_sync.core.config import known_hosts_path
 from netbox_sync.core.netbox import NetBoxError, related_id, related_name
 from netbox_sync.core.switches import (
     PLATFORMS,
+    cable_targets,
     describe_snapshot,
     discover_switch,
     plan_switch_sync,
@@ -525,7 +526,8 @@ class Actions:
                 # Started after the planning task has finished, so the next
                 # task is not rejected as "still busy".
                 if needs_review:
-                    dialog = SwitchMappingDialog(self.window, reviewable, create_cables)
+                    dialog = SwitchMappingDialog(self.window, reviewable, create_cables,
+                                                 interface_loader=lambda device_id: cable_targets(nb, device_id))
                     if not dialog.exec():
                         return
                     stored = {switch["id"]: switch for switch in self.state.switches}
