@@ -355,7 +355,8 @@ class AccessPointsPage(Page):
                 tenant_name = self._tenant_name(self._tenant_for(placement))
             else:
                 site_name = ""
-            state = ("ignored" if self.engine and self._placement(ap)["ignored"] else "new") if not device                 else ("check" if ap["issues"] else "known")
+            state = "ignored" if self._excluded(ap) else ("ignored" if self.engine and self._placement(ap)["ignored"]
+                                                          else "new") if not device                 else ("check" if ap["issues"] else "known")
             rows.append(dict(ap, key=self.key_func(ap), state=state if self.engine else "", site_id=site_id,
                              netbox_site=site_name, tenant=tenant_name or "",
                              netbox_device=device.name if device else "", method=ap.get("method", "")))
@@ -402,8 +403,12 @@ class AccessPointsPage(Page):
     # Sites and transfer
     # ------------------------------------------------------------------
 
+    def _excluded(self, ap):
+        """Left out deliberately (overridden by the printer page)."""
+        return False
+
     def _new_aps(self):
-        return [ap for ap in self.aps if not ap.get("device")]
+        return [ap for ap in self.aps if not ap.get("device") and not self._excluded(ap)]
 
     def _prepare_sync(self):
         return self.engine
@@ -466,7 +471,8 @@ class AccessPointsPage(Page):
                             "\n".join(homeless))
             return
         engine, rename = self._prepare_sync(), self.rename.isChecked()
-        aps = [ap for ap in self.aps if ap.get("device") or self.key_func(ap) in placements]
+        aps = [ap for ap in self.aps if (ap.get("device") and not self._excluded(ap))
+               or self.key_func(ap) in placements]
 
         def run(dry_run):
             return lambda ctx: engine.sync(aps, placements, role_id, rename, dry_run=dry_run, default_site=default_site)

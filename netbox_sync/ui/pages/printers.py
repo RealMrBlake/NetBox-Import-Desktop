@@ -2,7 +2,7 @@
 
 import uuid
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -34,6 +34,8 @@ from netbox_sync.ui.widgets import (
     label,
 )
 
+MODEL_ACTIONS = (("create", "Gerätetyp neu anlegen"), ("map", "Vorhandenen Gerätetyp verwenden"),
+                 ("skip", "Diesmal überspringen"), ("ignore", "Dauerhaft ignorieren"))
 AUTH_CHOICES = ["", *snmp.AUTH_PROTOCOLS]
 PRIV_CHOICES = ["", *snmp.PRIV_PROTOCOLS]
 
@@ -189,6 +191,61 @@ class SnmpCredentialsDialog(_Dialog):
         super().accept()
 
 
+class ModelMappingDialog(_Dialog):
+    """Decide per printer model that is missing in NetBox: create, map to an existing type, skip or ignore."""
+
+    def __init__(self, parent, rows, device_types):
+        super().__init__(parent, "Modelle zuordnen",
+                         "Diese Modelle gibt es in NetBox noch nicht als Gerätetyp. Pro Modell: neu anlegen, einen "
+                         "vorhandenen Gerätetyp verwenden, die Drucker dieses Modells diesmal überspringen oder dauerhaft "
+                         "ignorieren (gespeichert im Profil).", width=900)
+        self.resize(1040, 520)
+        type_items = [(f"{row['manufacturer']} {row['model']}".strip(), row["id"]) for row in device_types]
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Hersteller / Modell (SNMP)", "Drucker", "Aktion", "Gerätetyp in NetBox"])
+        self.rows = []
+        for text, count, key, decision, suggestion in rows:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(text))
+            self.table.setItem(row, 1, QTableWidgetItem(str(count)))
+            action = QComboBox()
+            for value, caption in MODEL_ACTIONS:
+                action.addItem(caption, value)
+            device_type = SearchableComboBox("Gerätetyp suchen …")
+            device_type.set_items(type_items, decision.get("device_type") or suggestion)
+            chosen = decision.get("action") or ("map" if suggestion else "create")
+            action.setCurrentIndex(next(index for index, (value, _c) in enumerate(MODEL_ACTIONS) if value == chosen))
+            action.currentIndexChanged.connect(lambda _i, a=action, d=device_type: d.setEnabled(a.currentData() == "map"))
+            device_type.setEnabled(chosen == "map")
+            self.table.setCellWidget(row, 2, action)
+            self.table.setCellWidget(row, 3, device_type)
+            self.rows.append((key, text, action, device_type))
+        self.table.verticalHeader().hide()
+        self.table.verticalHeader().setDefaultSectionSize(42)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionMode(QTableWidget.NoSelection)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        for column, width in enumerate((330, 60, 250, 300)):
+            self.table.setColumnWidth(column, width)
+        self.root.addWidget(self.table, 1)
+        self.root.addWidget(self.error_banner)
+        buttons, _ok = form_dialog_buttons(self, "Übernehmen")
+        self.root.addWidget(buttons)
+        self.result = {}
+
+    def accept(self):
+        result = {}
+        for key, text, action, device_type in self.rows:
+            value = action.currentData()
+            if value == "map" and device_type.valid_data() is None:
+                self.show_error(f"Bitte für „{text}“ einen vorhandenen Gerätetyp wählen.")
+                return
+            result[key] = {"action": value, "device_type": device_type.valid_data() if value == "map" else None}
+        self.result = result
+        super().accept()
+
+
 class PrintersPage(AccessPointsPage):
     title = "Drucker"
     subtitle = ("Drucker per SNMP (v2c und v3) im Netzwerk finden – herstellerübergreifend über die Printer-MIB – "
@@ -212,6 +269,8 @@ class PrintersPage(AccessPointsPage):
         self.others = []
         self._engine_args = {}
         self._compare_after_scan = False
+        self._skipped = set()         # printer keys left out for this session
+        self._skipped_models = set()  # model keys left out for this session
 
         source = Card("Scan", "Erreichbare Adressen werden per SNMP abgefragt; Geräte nur mit offenem Druckerport "
                               "(9100/IPP/LPD) erscheinen als „ohne SNMP“.")
@@ -256,6 +315,7 @@ class PrintersPage(AccessPointsPage):
         self.body.addWidget(source)
 
         result = Card("Abgleich")
+        self.models_button = result.add_action(button("Modelle …", "server", on_click=self.edit_models))
         self.sites_button = result.add_action(button("Standorte && Mandanten …", "globe", on_click=self.map_sites))
         self.refresh_button = result.add_action(button("Neu abgleichen", "refresh", on_click=self.compare))
         filters = QHBoxLayout()
@@ -300,6 +360,8 @@ class PrintersPage(AccessPointsPage):
         self.table.setModel(self.proxy)
         for index, column in enumerate(columns):
             self.table.setColumnWidth(index, column.width)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._context_menu)
         self.stack = QStackedWidget()
         self.stack.addWidget(EmptyState("search", "Noch nicht gescannt",
                                         "IP-Bereiche eintragen, SNMP-Zugangsdaten prüfen und „Scannen“ wählen. "
@@ -335,6 +397,7 @@ class PrintersPage(AccessPointsPage):
 
     def _profile_switched(self):
         self.aps, self.only_netbox, self.engine, self.roles, self.others = [], [], None, [], []
+        self._skipped, self._skipped_models = set(), set()
         self.role.set_items([])
         self.default_site.set_items([])
         settings = self._settings()
@@ -397,6 +460,7 @@ class PrintersPage(AccessPointsPage):
 
     def _update_buttons(self):
         super()._update_buttons()
+        widgets.set_enabled(self.models_button, bool(self.engine) and not self.tasks.busy, "Erst mit NetBox abgleichen.")
         widgets.set_enabled(self.refresh_button, bool(self.aps) and not self.tasks.busy, "Erst scannen.")
         widgets.set_enabled(self.sync_button, bool(self.engine) and not self.tasks.busy,
                             "Erst scannen." if not self.engine else "Bitte warten …")
@@ -497,9 +561,137 @@ class PrintersPage(AccessPointsPage):
 
     def _prepare_sync(self):
         self.engine.counters = self.counters.isChecked()
+        self.engine.type_map = {key: value["device_type"] for key, value in self._model_decisions().items()
+                                if value.get("action") == "map" and value.get("device_type")}
         return self.engine
 
+    # ------------------------------------------------------------------
+    # Ignoring printers and models
+    # ------------------------------------------------------------------
+
+    def _ignored(self):
+        return set(self._settings().get("ignored") or [])
+
+    def _model_decisions(self):
+        return dict(self._settings().get("models") or {})
+
+    def _model_action(self, printer):
+        key = printers.model_key(printer)
+        if key in self._skipped_models:
+            return "skip"
+        return self._model_decisions().get(key, {}).get("action")
+
+    def _excluded(self, printer):
+        key = self.key_func(printer)
+        if key in self._skipped or key in self._ignored():
+            return True
+        # a skipped or ignored model only matters for printers that would be created
+        return not printer.get("device") and self._model_action(printer) in ("skip", "ignore")
+
+    def _missing_models(self):
+        """``{model key: [printers]}`` of new printers whose device type is not in NetBox."""
+        if not self.engine:
+            return {}
+        missing = {}
+        for printer in self.aps:
+            if printer.get("device") or self.key_func(printer) in self._skipped | self._ignored():
+                continue
+            if not self.engine.type_exists(printer):
+                missing.setdefault(printers.model_key(printer), []).append(printer)
+        return missing
+
+    def edit_models(self):
+        missing = self._missing_models()
+        if not missing:
+            self.window.toast("Alle Modelle der neuen Drucker gibt es bereits in NetBox.", "info")
+            return True
+        decisions = self._model_decisions()
+        rows = []
+        for key, members in sorted(missing.items()):
+            first = members[0]
+            decision = dict(decisions.get(key) or {})
+            if key in self._skipped_models:
+                decision["action"] = "skip"
+            text = f"{first.get('manufacturer') or 'Unbekannt'} · {first.get('model') or '(kein Modell – nur Ports)'}"
+            rows.append((text, len(members), key, decision, self.engine.suggest_type(first)))
+        dialog = ModelMappingDialog(self.window, rows, self.engine.device_types)
+        if not dialog.exec():
+            return False
+        for key, value in dialog.result.items():
+            if value["action"] == "skip":
+                self._skipped_models.add(key)
+                decisions.pop(key, None)
+            else:
+                self._skipped_models.discard(key)
+                decisions[key] = value
+        self._store(models=decisions)
+        self._refresh()
+        return True
+
+    def _set_ignored(self, rows, mode):
+        keys = {row["key"] for row in rows if not str(row["key"]).startswith("netbox-")}
+        ignored = self._ignored()
+        if mode == "skip":
+            self._skipped |= keys
+        elif mode == "ignore":
+            ignored |= keys
+            self._skipped -= keys
+        else:
+            ignored -= keys
+            self._skipped -= keys
+            # also release the model of these printers
+            models = {printers.model_key(row) for row in rows}
+            self._skipped_models -= models
+            decisions = self._model_decisions()
+            for key in models:
+                if decisions.get(key, {}).get("action") == "ignore":
+                    decisions.pop(key)
+            self._store(models=decisions)
+        self._store(ignored=sorted(ignored))
+        self._refresh()
+
+    def _context_menu(self, position):
+        rows = [self.proxy.row_at(index) for index in self.table.selectionModel().selectedRows()]
+        rows = [row for row in rows if row and not str(row["key"]).startswith("netbox-")]
+        if not rows:
+            return
+        count = f" ({len(rows)})" if len(rows) > 1 else ""
+        menu = QMenu(self)
+        menu.addAction(f"Diesmal ignorieren{count}", lambda: self._set_ignored(rows, "skip"))
+        menu.addAction(f"Dauerhaft ignorieren{count}", lambda: self._set_ignored(rows, "ignore"))
+        if any(row["state"] == "ignored" for row in rows):
+            menu.addAction(f"Nicht mehr ignorieren{count}", lambda: self._set_ignored(rows, "release"))
+        if self.engine and any(not row.get("device") for row in rows):
+            menu.addSeparator()
+            menu.addAction("Modell zuordnen …", self.edit_models)
+        menu.exec(self.table.viewport().mapToGlobal(position))
+
+    def sync(self):
+        if not self.engine or self.tasks.busy:
+            return
+        undecided = [key for key in self._missing_models()
+                     if key not in self._skipped_models and key not in self._model_decisions()]
+        if undecided and not self.edit_models():
+            return
+        super().sync()
+
     def _refresh(self):
+        if self.engine:
+            decisions = self._model_decisions()
+            for printer in self.aps:
+                printer["issues"] = [issue for issue in printer.get("issues", [])
+                                     if not issue.startswith("Modell nicht in NetBox")]
+                if printer.get("device") or self._excluded(printer) or self.engine.type_exists(printer):
+                    continue
+                decision = decisions.get(printers.model_key(printer), {})
+                if decision.get("action") == "map":
+                    name = next((f"{row['manufacturer']} {row['model']}" for row in self.engine.device_types
+                                 if row["id"] == decision.get("device_type")), "?")
+                    printer["issues"].append(f"Modell nicht in NetBox – wird als „{name}“ angelegt")
+                elif decision.get("action") == "create":
+                    printer["issues"].append("Modell nicht in NetBox – Gerätetyp wird neu angelegt")
+                else:
+                    printer["issues"].append("Modell nicht in NetBox – bitte unter „Modelle …“ entscheiden")
         super()._refresh()
         if self.others and self.summary.text():
             count = len(self.others)

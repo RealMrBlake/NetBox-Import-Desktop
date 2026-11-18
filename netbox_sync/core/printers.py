@@ -32,6 +32,9 @@ HR_PRINTER = "1.3.6.1.2.1.25.3.1.5"
 HR_PRINTER_STATUS = "1.3.6.1.2.1.25.3.5.1.1"
 HR_PRINTER_ERRORS = "1.3.6.1.2.1.25.3.5.1.2"
 PRT_SERIAL = "1.3.6.1.2.1.43.5.1.1.17"
+PRT_PRINTER_NAME = "1.3.6.1.2.1.43.5.1.1.16"
+HP_DEVICE_ID = "1.3.6.1.4.1.11.2.3.9.1.1.7.0"  # IEEE 1284 device ID "MFG:HP;MDL:HP LaserJet …;"
+GENERIC_DESCR = re.compile(r"ETHERNET MULTI-ENVIRONMENT|JETDIRECT|^\s*$", re.IGNORECASE)
 PRT_INPUT = "1.3.6.1.2.1.43.8.2.1"
 PRT_LIFE_COUNT = "1.3.6.1.2.1.43.10.2.1.4"
 PRT_SUPPLIES = "1.3.6.1.2.1.43.11.1.1"
@@ -181,6 +184,10 @@ def read_printer(client, ip):
     if not printer_indexes and not serials and not counters:
         return None
     descr = client.get([f"{HR_DEVICE_DESCR}.{index}" for index in printer_indexes]) if printer_indexes else {}
+    printer_name = snmp.text(_first(client.walk(PRT_PRINTER_NAME, limit=20)))
+    device_id = snmp.text(client.get([HP_DEVICE_ID]).get(HP_DEVICE_ID))
+    device_model = next((part.split(":", 1)[1].strip() for part in device_id.split(";")
+                         if part.strip().upper().startswith(("MDL:", "MODEL:"))), "")
     status = client.get([f"{oid}.{index}" for index in printer_indexes[:1]
                          for oid in (HR_PRINTER_STATUS, HR_PRINTER_ERRORS)]) if printer_indexes else {}
     colorants_raw = client.walk(PRT_COLORANT, limit=50)
@@ -197,9 +204,10 @@ def read_printer(client, ip):
 
     sys_descr = snmp.text(base.get(SYS_DESCR))
     object_id = base.get(SYS_OBJECT_ID) or ""
-    model_text = snmp.text(next(iter(descr.values()), "")) if descr else ""
+    candidates = [printer_name, snmp.text(next(iter(descr.values()), "")) if descr else "", device_model, sys_descr]
+    model_text = next((text for text in candidates if text and not GENERIC_DESCR.search(text)), "")
     manufacturer = manufacturer_from(object_id, model_text, sys_descr)
-    model = clean_model(model_text or sys_descr, manufacturer)
+    model = clean_model(model_text, manufacturer)
     if not firmware:
         match = re.search(r"(?:firmware|fw|version|ver\.?)\s*[:=]?\s*([\w.\-]+)", sys_descr, re.IGNORECASE)
         firmware = match.group(1) if match else ""
@@ -318,7 +326,10 @@ def to_import(host):
     issues = list(host.get("notes", []))
     if host.get("errors"):
         issues.append("Gerät meldet: " + ", ".join(host["errors"]))
-    return dict(host, name=re.sub(r"\s+", " ", name).strip()[:64], serial=(host.get("serial") or "").upper(),
+    defaults = {"manufacturer": "", "model": "", "firmware": "", "supplies": [], "trays": [], "page_count": None,
+                "color": None, "errors": [], "display": [], "alerts": [], "status": "", "prefix_length": None,
+                "snmp": ""}
+    return dict({**defaults, **host}, name=re.sub(r"\s+", " ", name).strip()[:64], serial=(host.get("serial") or "").upper(),
                 mac=normalize_mac(host.get("mac")) or "", issues=issues, site_hint=host.get("site_hint") or "")
 
 
@@ -333,6 +344,11 @@ def mark_duplicates(printers):
                 for printer in members:
                     others = ", ".join(other["ip"] for other in members if other is not printer)
                     printer["issues"].append(f"{text} {value} doppelt (auch {others})")
+
+
+def model_key(printer):
+    """Key of the NetBox device type a new printer needs (``manufacturer|model``, case-insensitive)."""
+    return f"{printer.get('manufacturer') or 'Unbekannt'}|{printer.get('model') or 'Drucker'}".casefold()
 
 
 def printer_key(printer):
@@ -351,6 +367,36 @@ class PrinterSyncEngine(APSyncEngine):
         self.role_id = role_id
         self.counters = counters
         self.today = datetime.date.today().isoformat()
+        self.device_types = []
+        self.type_map = {}  # model_key -> device type ID chosen by the user
+
+    def load_context(self, tenant_id=None):
+        result = super().load_context(tenant_id)
+        self.device_types = sorted(({"id": item.id, "model": item.model,
+                                     "manufacturer": getattr(getattr(item, "manufacturer", None), "name", "") or ""}
+                                    for item in self.nb.dcim.device_types.all()),
+                                   key=lambda row: (row["manufacturer"].casefold(), row["model"].casefold()))
+        return result
+
+    def type_exists(self, printer):
+        """Is the device type of ``printer`` already in NetBox (same manufacturer and model)?"""
+        manufacturer, model, _platform = self._identity(printer)
+        return any(row["model"].casefold() == model.casefold() and row["manufacturer"].casefold() in (
+            manufacturer.casefold(), "hewlett-packard" if manufacturer.casefold() == "hp" else "")
+            for row in self.device_types)
+
+    def suggest_type(self, printer):
+        """Device type with a similar model name, or ``None``."""
+        model = re.sub(r"[^0-9a-z]", "", (printer.get("model") or "").casefold())
+        if len(model) < 4:
+            return None
+        matches = [row["id"] for row in self.device_types
+                   if model in re.sub(r"[^0-9a-z]", "", row["model"].casefold())
+                   or re.sub(r"[^0-9a-z]", "", row["model"].casefold()) in model]
+        return matches[0] if len(matches) == 1 else None
+
+    def _mapped_type(self, printer):
+        return self.type_map.get(model_key(printer))
 
     def _known_devices(self, scope):
         if not self.role_id:

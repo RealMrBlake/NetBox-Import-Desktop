@@ -172,6 +172,10 @@ class APSyncEngine(ClientSyncEngine):
         """``(manufacturer, model, platform or None)`` of a new device."""
         return MANUFACTURER, ap["model"] or "Access Point", PLATFORM
 
+    def _mapped_type(self, ap):
+        """Device type ID chosen by the user instead of creating one, or ``None``."""
+        return None
+
     def _extra_payload(self, ap):
         """Additional fields for a new device."""
         return {}
@@ -326,7 +330,8 @@ class APSyncEngine(ClientSyncEngine):
                 raise APImportError("keine Geräterolle gewählt")
             manufacturer, model, platform = self._identity(ap)
             manufacturer_id = self._manufacturer(manufacturer, report, dry_run)
-            type_id = self._device_type(manufacturer, manufacturer_id, model, report, dry_run)
+            type_id = self._mapped_type(ap) or self._device_type(manufacturer, manufacturer_id, model, report,
+                                                                 dry_run)
             platform_id = self._platform(platform, report, dry_run) if platform else None
             # An explicitly chosen tenant wins, otherwise the one of the site.
             tenant_id = placement.get("tenant") or self._site_tenant(site_id)

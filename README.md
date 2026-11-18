@@ -171,6 +171,12 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
   paper trays, status, error flags, display text and alerts
 - Devices with open printer ports but no SNMP answer are listed as
   "without SNMP"
+- Printers can be ignored this time or permanently (context menu); models
+  missing in NetBox as device type can be created, mapped to an existing
+  device type (with suggestion), skipped this time or ignored permanently
+  ("Modelle …", asked before the transfer)
+- The model is taken from prtGeneralPrinterName, hrDeviceDescr or the HP
+  device ID – not from generic JetDirect descriptions
 - Same workflow as the access point import: matching by serial number, MAC
   address, name and IP address, site/tenant mapping by SNMP location, default
   site, preview before writing

@@ -146,3 +146,38 @@ def test_sync_creates_fields_and_printers_and_updates_counters(agent):
     assert nb.dcim.device_types.created[0]["model"] == "Color LaserJet Pro M454dw"
     assert nb.ipam.ip_addresses.created[-1]["address"] == f"{IP}/24"
     assert nb.dcim.devices.get(201).custom_fields["printer_page_count"] == 200
+
+
+def test_hp_jetdirect_model_comes_from_printer_name_not_generic_sysdescr():
+    mib = {key: value for key, value in MIB.items() if not key.startswith(printers.HR_DEVICE_DESCR)}
+    mib[printers.HP_DEVICE_ID] = "MFG:Hewlett-Packard;CMD:PJL,PCL;MDL:HP LaserJet M402dn;CLS:PRINTER;"
+    agent = Agent(mib)
+    try:
+        info = read_printer(_client(agent, {"version": "2c", "community": "public"}), IP)
+        assert info["model"] == "LaserJet M402dn" and info["manufacturer"] == "HP"
+        mib[f"{printers.PRT_PRINTER_NAME}.1"] = "HP LaserJet Pro M404dn"
+    finally:
+        agent.close()
+    agent = Agent(mib)
+    try:
+        assert read_printer(_client(agent, {"version": "2c", "community": "public"}), IP)["model"] == \
+            "LaserJet Pro M404dn"
+    finally:
+        agent.close()
+
+
+def test_missing_model_can_be_mapped_to_an_existing_device_type():
+    nb = _netbox()
+    nb.dcim.manufacturers.records.append(Record(nb.dcim.manufacturers, id=50, name="HP", slug="hp"))
+    nb.dcim.device_types.records.append(Record(nb.dcim.device_types, id=60, model="LaserJet Pro M404",
+                                               manufacturer=SimpleNamespace(id=50, name="HP")))
+    printer = to_import({"ip": "10.20.0.70", "name": "Drucker24", "manufacturer": "HP", "model": "LaserJet Pro M404dn",
+                         "serial": "PHCLJ40175", "mac": "", "snmp": "SNMPv2c", "notes": []})
+    engine = PrinterSyncEngine(nb, role_id=31, counters=False)
+    engine.load_context(7)
+    engine.match([printer])
+    assert not engine.type_exists(printer) and engine.suggest_type(printer) == 60
+    engine.type_map = {printers.model_key(printer): 60}
+    report = engine.sync([printer], {printer_key(printer): {"site": 21, "tenant": 7}}, role_id=31, dry_run=False)
+    assert report["errors"] == [] and nb.dcim.device_types.created == []
+    assert nb.dcim.devices.created[-1]["device_type"] == 60
