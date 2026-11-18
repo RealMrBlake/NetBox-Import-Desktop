@@ -115,8 +115,17 @@ class ClientTargetDialog(_Dialog):
                                            "unverändert.")
         self.update_existing = checkbox("Vorhandene Geräte aktualisieren (Modell, Plattform, Seriennummer)",
                                         options.get("update_existing", True))
+        self.software = checkbox("Installierte Software in netbox-slm pflegen (nur Agent-Clients)",
+                                 options.get("sync_software", False),
+                                 tooltip="Legt für die vom NetBox Windows Agent gemeldete Software fehlende "
+                                         "Hersteller, Softwareprodukte, Versionen und Installationen im Plugin "
+                                         "netbox-slm an und entfernt automatisch angelegte Installationen, die "
+                                         "nicht mehr gemeldet werden. Von Hand erfasste Installationen bleiben "
+                                         "unverändert. Die Client-Software-Übersicht von netbox-utilities zeigt "
+                                         "diese Daten an.")
         self.root.addWidget(self.interfaces)
         self.root.addWidget(self.update_existing)
+        self.root.addWidget(self.software)
         self.root.addWidget(label("Zuordnung über den Gerätenamen (ohne Groß-/Kleinschreibung). Standort und Rolle "
                                   "vorhandener Geräte bleiben unverändert.", muted=True, wrap=True))
         self.root.addWidget(self.error_banner)
@@ -144,6 +153,7 @@ class ClientTargetDialog(_Dialog):
             "site_id": site, "role_id": role, "role_name": role_text,
             "tenant_id": tenant,
             "interfaces": self.interfaces.isChecked(), "update_existing": self.update_existing.isChecked(),
+            "software": self.software.isChecked(),
         }
         super().accept()
 
@@ -166,6 +176,9 @@ class ClientPreviewDialog(_Dialog):
         assets = report.get("assets_created", 0) + report.get("assets_updated", 0)
         if assets:
             items.append((f"{assets} Assets", "info"))
+        software = report.get("software_installed", 0) + report.get("software_removed", 0)
+        if software:
+            items.append((f"{software} Software-Installationen", "info"))
         if report["errors"]:
             items.append((f"{len(report['errors'])} Probleme", "error"))
         for text, kind in items:

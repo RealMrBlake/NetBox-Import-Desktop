@@ -41,6 +41,7 @@ DEFAULT_CLIENT_OPTIONS = {
     "netbox_tenant": None,
     "sync_interfaces": True,
     "update_existing": True,
+    "sync_software": False,       # installed software of agent clients as netbox-slm installations
 }
 
 # Win32_SystemEnclosure.ChassisTypes

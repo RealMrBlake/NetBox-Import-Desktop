@@ -136,6 +136,8 @@ class ClientSyncEngine:
         self._platforms = {}
         self._planned = set()
         self._asset_endpoint = _UNKNOWN
+        self._software = None
+        self.software = False
 
     # ------------------------------------------------------------------
     # Lookups
@@ -227,7 +229,7 @@ class ClientSyncEngine:
     def new_report():
         return {"devices_created": 0, "devices_updated": 0, "devices_unchanged": 0, "objects_created": 0,
                 "interfaces_created": 0, "ips_created": 0, "assets_created": 0, "assets_updated": 0,
-                "changes": [], "errors": [], "items": []}
+                "software_installed": 0, "software_removed": 0, "changes": [], "errors": [], "items": []}
 
     # ------------------------------------------------------------------
     # netbox-inventory plugin (asset management)
@@ -301,9 +303,24 @@ class ClientSyncEngine:
                   "description": "UUID", "comments": "Inventarbericht"}
         return ["Asset aktualisieren: " + ", ".join(labels[key] for key in updates)]
 
+    def software_sync(self):
+        if self._software is None:
+            from netbox_sync.core.software_slm import SlmSoftwareSync
+            self._software = SlmSoftwareSync(self.nb, self, self.log)
+        return self._software
+
+    def _sync_software(self, client, device, dry_run, report):
+        """Installed software as netbox-slm installations; a problem there never fails the device."""
+        try:
+            return self.software_sync().sync(client, device, dry_run, report)
+        except Exception as error:  # noqa: BLE001 - the device itself is fine; report the software problem
+            report["errors"].append(f"{client['name']}: Software – {error}")
+            return [f"Software fehlgeschlagen: {error}"]
+
     def sync(self, clients, site_id, role_id, tenant_id=None, interfaces=True, update_existing=True, dry_run=True,
-             progress=_noop, cancelled=lambda: False):
+             progress=_noop, cancelled=lambda: False, software=False):
         self._planned = set()
+        self.software = software
         report = self.new_report()
         for index, client in enumerate(clients):
             if cancelled():
@@ -345,6 +362,8 @@ class ClientSyncEngine:
                                        + (f" ({', '.join(interface['ips'])})" if interface.get("ips") else ""))
                         report["interfaces_created"] += 1
                         report["ips_created"] += len(interface.get("ips", []))
+                if self.software:
+                    changes.extend(self._sync_software(client, None, dry_run, report))
                 return changes
             payload = {"name": name, "device_type": type_id, "role": role_id, "site": site_id, "status": "active"}
             if platform_id:
@@ -391,6 +410,8 @@ class ClientSyncEngine:
         except Exception as error:  # noqa: BLE001 - the device itself is fine; report the asset problem
             report["errors"].append(f"{name}: Asset – {error}")
             changes.append(f"Asset fehlgeschlagen: {error}")
+        if self.software:
+            changes.extend(self._sync_software(client, device, dry_run, report))
         if not changes:
             report["devices_unchanged"] += 1
         return changes

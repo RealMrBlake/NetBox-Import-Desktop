@@ -232,6 +232,16 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
   Group Policy startup script; the setup guide has a tab with all steps
 - The agent data runs through the same table and NetBox transfer as the WinRM
   scan, plus disks and the number of installed programs in the tooltip
+- Optional: "Installierte Software in netbox-slm pflegen" in the transfer dialog
+  records the installed software as installations of the
+  [netbox-slm](https://git.mrblake.cc/MrBlake/NetBox-SLM) plugin. Missing
+  manufacturers (publisher without legal suffix, e.g. "Microsoft Corporation" →
+  "Microsoft"), software products and versions are created; automatic
+  installations that the agent no longer reports are removed, installations
+  entered by hand stay. Names and the marker comment match the software
+  transfer of [NetBox Utilities](https://git.mrblake.cc/MrBlake/Netbox-Utilities),
+  so both can run side by side; its **Client Software Übersicht** shows the
+  result. Without netbox-slm the option is skipped with a log message
 
 ### Offline mode (without NetBox)
 

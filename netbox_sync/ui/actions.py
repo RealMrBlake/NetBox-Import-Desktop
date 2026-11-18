@@ -775,7 +775,8 @@ class Actions:
                 choice = dialog.result
                 self.state.update_client_options(
                     netbox_site=choice["site_id"], netbox_role=choice["role_name"], netbox_tenant=choice["tenant_id"],
-                    sync_interfaces=choice["interfaces"], update_existing=choice["update_existing"])
+                    sync_interfaces=choice["interfaces"], update_existing=choice["update_existing"],
+                    sync_software=choice["software"])
                 self._preview_clients(engine, rows, choice)
             QTimer.singleShot(0, ask)
 
@@ -786,7 +787,7 @@ class Actions:
     def _run_client_sync(engine, rows, choice, ctx, dry_run, role_id=None):
         return engine.sync(rows, choice["site_id"], role_id or choice["role_id"], choice["tenant_id"],
                            choice["interfaces"], choice["update_existing"], dry_run=dry_run,
-                           progress=ctx.progress, cancelled=lambda: ctx.cancelled)
+                           progress=ctx.progress, cancelled=lambda: ctx.cancelled, software=choice.get("software", False))
 
     def _preview_clients(self, engine, rows, choice):
         def show(report):
@@ -812,7 +813,10 @@ class Actions:
             text = (f"{report['devices_created']} Geräte angelegt, {report['devices_updated']} aktualisiert, "
                     f"{report['interfaces_created']} Schnittstellen, {report['ips_created']} IP-Adressen"
                     + (f", {report['assets_created']} Assets angelegt, {report['assets_updated']} aktualisiert"
-                       if report.get("assets_created") or report.get("assets_updated") else ""))
+                       if report.get("assets_created") or report.get("assets_updated") else "")
+                    + (f", {report['software_installed']} Software-Installationen angelegt, "
+                       f"{report['software_removed']} entfernt"
+                       if report.get("software_installed") or report.get("software_removed") else ""))
             area_log("client")(f"Client-Übertragung: {text}", "success")
             if report["errors"]:
                 widgets.message(self.window, "Mit Problemen abgeschlossen", text + ".", "warning",
