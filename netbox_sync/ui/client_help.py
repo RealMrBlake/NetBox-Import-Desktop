@@ -150,11 +150,12 @@ Verbindungen an.</li>
 <li><b>Agent-Konfiguration speichern …</b> erzeugt die fertige <span class="path">config.json</span>.</li>
 </ol>
 
-<h3>2. Dateien zusammenstellen</h3>
-<p><span class="path">agent.exe</span>, <span class="path">install.ps1</span>,
-<span class="path">uninstall.ps1</span> und <span class="path">gpo-startup.ps1</span> kommen aus dem
-Agent-Projekt ({AGENT_REPO}, Ordner <span class="path">dist</span> bzw. <span class="path">scripts</span>),
-dazu die eben gespeicherte <span class="path">config.json</span>.</p>
+<h3>2. Agent herunterladen</h3>
+<p>Auf der <a href="{AGENT_REPO}/releases/latest">Release-Seite des Agenten</a> das ZIP-Paket laden –
+<span class="path">win-x64</span> für Intel/AMD, <span class="path">win-arm64</span> für ARM-Geräte. Es enthält
+<span class="path">agent.exe</span>, <span class="path">install.ps1</span>, <span class="path">uninstall.ps1</span>
+und <span class="path">gpo-startup.ps1</span>. Dazu kommt die eben gespeicherte
+<span class="path">config.json</span>.</p>
 
 <h3>3a. Verteilung per Intune</h3>
 <table>
@@ -170,8 +171,10 @@ dazu die eben gespeicherte <span class="path">config.json</span>.</p>
 
 <h3>3b. Verteilung per Gruppenrichtlinie</h3>
 <ol>
-<li>Alle fünf Dateien in eine Freigabe legen, die „Domänencomputer“ lesen dürfen, z. B.
-<span class="path">\\\\fileserver\\NetBoxAgent$</span>.</li>
+<li>Diese fünf Dateien in eine Freigabe legen, die „Domänencomputer“ lesen dürfen, z. B.
+<span class="path">\\\\fileserver\\NetBoxAgent$</span>:
+<span class="path">agent.exe</span>, <span class="path">config.json</span>, <span class="path">install.ps1</span>,
+<span class="path">uninstall.ps1</span> und <span class="path">gpo-startup.ps1</span>.</li>
 <li>GPO für die OU der Clients: <b>Computerkonfiguration › Richtlinien › Windows-Einstellungen › Skripts ›
 Starten › PowerShell-Skripts</b> – <span class="path">\\\\fileserver\\NetBoxAgent$\\gpo-startup.ps1</span>
 ohne Parameter.</li>
