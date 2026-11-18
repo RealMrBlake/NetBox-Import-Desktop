@@ -276,8 +276,13 @@ def apply_scan(row, raw, now=None):
         "source": raw.get("source", "winrm"),
         "agent_version": raw.get("agent_version", ""),
         "software_count": len(raw.get("software") or []),
-        "disks": [{"model": disk.get("model", ""), "size": int(disk.get("size") or 0)}
-                  for disk in raw.get("disks") or []],
+        "software": [{"name": item.get("name", ""), "version": item.get("version", ""),
+                      "publisher": item.get("publisher", "")} for item in raw.get("software") or []],
+        "disks": [{"model": disk.get("model", ""), "size": int(disk.get("size") or 0),
+                   "serial": disk.get("serial", "")} for disk in raw.get("disks") or []],
+        "memory_modules": [{"bank": item.get("bank", ""), "manufacturer": item.get("manufacturer", ""),
+                            "part_number": item.get("part_number", ""), "capacity": int(item.get("capacity") or 0)}
+                           for item in raw.get("memory_modules") or []],
         # Only real adapters: VPN/TAP drivers report no MAC or are not physical.
         "interfaces": [_interface(nic) for nic in raw.get("nics") or [] if nic.get("physical") and nic.get("mac")],
     })

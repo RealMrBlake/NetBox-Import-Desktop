@@ -222,3 +222,41 @@ def test_scan_runs_in_process(monkeypatch):
     status = {row["host"]: row["status"] for row in results}
     assert status == {"pc01.firma.local": "ok", "off": "offline", "unknown": "offline"}
     assert len(seen) == 3
+
+
+def test_agent_software_goes_into_a_managed_comment_block():
+    nb, client = _setup()
+    raw = dict(RAW, source="agent", agent_version="0.2.0",
+               software=[{"name": "7-Zip", "version": "24.08", "publisher": "Igor Pavlov"},
+                         {"name": "A | B", "version": "", "publisher": ""}],
+               disks=[{"model": "Micron SSD", "size": 512105932800, "serial": "M1"}],
+               memory_modules=[{"bank": "DIMM 0", "manufacturer": "Samsung", "part_number": "M425", "capacity": 2 ** 34}])
+    agent_client = apply_scan(new_row("pc01.firma.local"), raw)
+    engine = ClientSyncEngine(nb)
+    engine.load_targets()
+    preview = engine.sync([agent_client], 1, 2, dry_run=True)
+    assert "Inventarbericht in den Kommentaren (2 Programme)" in preview["items"][0][1]
+    engine.sync([agent_client], 1, 2, dry_run=False)
+    device = nb.dcim.devices.records[0]
+    assert "| 7-Zip | 24.08 | Igor Pavlov |" in device.comments and "| A / B |" in device.comments
+    assert "Micron SSD – 512 GB – S/N M1" in device.comments and "DIMM 0: 16 GB Samsung M425" in device.comments
+
+    # Hand-written notes survive, an unchanged inventory (only a new scan time) is no update.
+    device.comments = "Notiz vom Admin\n\n" + device.comments
+    again = ClientSyncEngine(nb)
+    again.load_targets()
+    rescanned = dict(agent_client, scanned_at=agent_client["scanned_at"] + 3600)
+    assert again.sync([rescanned], 1, 2, dry_run=True)["devices_updated"] == 0
+    changed = dict(rescanned, software=rescanned["software"] + [{"name": "Firefox", "version": "140", "publisher": ""}])
+    report = again.sync([changed], 1, 2, dry_run=False)
+    assert "Inventarbericht aktualisieren (3 Programme)" in report["items"][0][1]
+    assert device.comments.startswith("Notiz vom Admin") and device.comments.count("<!-- netbox-sync:inventory -->") == 1
+    assert "| Firefox | 140 |  |" in device.comments
+
+
+def test_winrm_scan_leaves_comments_alone():
+    nb, client = _setup()
+    engine = ClientSyncEngine(nb)
+    engine.load_targets()
+    engine.sync([client], 1, 2, dry_run=False)
+    assert "comments" not in nb.dcim.devices.created[0]

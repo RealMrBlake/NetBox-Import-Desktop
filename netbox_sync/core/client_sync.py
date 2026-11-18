@@ -7,9 +7,75 @@ written; the report lists what would change.
 """
 
 import re
+import time
 
 from netbox_sync.core.netbox import assign_mac, normalize_mac, related_id
 from netbox_sync.core.clients import os_label
+
+
+REPORT_START = "<!-- netbox-sync:inventory -->"
+REPORT_END = "<!-- /netbox-sync:inventory -->"
+
+
+def inventory_report(client):
+    """Markdown hardware and software report of an agent scan, or ``""`` for other sources."""
+    if client.get("source") != "agent":
+        return ""
+    lines = ["## Inventar (NetBox Windows Agent)", ""]
+    for caption, value in (
+        ("System", " ".join(part for part in (client.get("manufacturer"), client.get("model")) if part)),
+        ("Seriennummer", client.get("serial")),
+        ("Betriebssystem", " ".join(part for part in (client.get("os"), client.get("os_display_version"),
+                                                       f"(Build {client['os_build']})" if client.get("os_build")
+                                                       else "") if part)),
+        ("CPU", f"{client['cpu']} ({client.get('cores') or '?'} Kerne)" if client.get("cpu") else ""),
+        ("RAM", f"{client['memory'] / 1024 ** 3:.0f} GB" if client.get("memory") else ""),
+        ("Erfasst", client.get("scanned_at") and time.strftime("%d.%m.%Y %H:%M", time.localtime(client["scanned_at"]))),
+    ):
+        if value:
+            lines.append(f"- **{caption}:** {value}")
+    if client.get("disks"):
+        lines += ["", "### Datenträger"]
+        lines += [f"- {disk['model']} – {disk['size'] / 1e9:.0f} GB" + (f" – S/N {disk['serial']}" if disk.get("serial")
+                                                                       else "") for disk in client["disks"]]
+    if client.get("memory_modules"):
+        lines += ["", "### Arbeitsspeicher"]
+        lines += [f"- {item['bank'] or 'RAM'}: {item['capacity'] / 1024 ** 3:.0f} GB"
+                  + (f" {item['manufacturer']}" if item.get("manufacturer") else "")
+                  + (f" {item['part_number']}" if item.get("part_number") else "") for item in client["memory_modules"]]
+    software = client.get("software") or []
+    if software:
+        lines += ["", f"### Installierte Software ({len(software)})", "", "| Programm | Version | Hersteller |",
+                  "|---|---|---|"]
+        lines += [f"| {_cell(item['name'])} | {_cell(item['version'])} | {_cell(item['publisher'])} |"
+                  for item in software]
+    return "\n".join(lines)
+
+
+def _cell(text):
+    return str(text or "").replace("|", "/").replace("\n", " ").strip()
+
+
+def merge_report(comments, report):
+    """Replace the managed report block in ``comments`` and keep everything written by hand."""
+    comments = comments or ""
+    block = f"{REPORT_START}\n{report}\n{REPORT_END}"
+    if REPORT_START in comments and REPORT_END in comments:
+        before, rest = comments.split(REPORT_START, 1)
+        after = rest.split(REPORT_END, 1)[1]
+        return f"{before}{block}{after}"
+    return f"{comments.rstrip()}\n\n{block}" if comments.strip() else block
+
+
+def _without_timestamp(text):
+    """The scan time changes every scan – it alone is no reason to update the report."""
+    return re.sub(r"^- \*\*Erfasst:\*\*.*$", "", text or "", flags=re.MULTILINE)
+
+
+def _report_body(comments):
+    if REPORT_START in (comments or "") and REPORT_END in comments:
+        return comments.split(REPORT_START, 1)[1].split(REPORT_END, 1)[0].strip()
+    return None
 
 
 def _noop(*_args, **_kwargs):
@@ -191,6 +257,8 @@ class ClientSyncEngine:
         if device is None:
             changes.append(f"Gerät anlegen · {manufacturer} {model}" + (f" · {platform}" if platform else "")
                            + (f" · S/N {serial}" if serial else ""))
+            if client.get("source") == "agent":
+                changes.append(f"Inventarbericht in den Kommentaren ({len(client.get('software') or [])} Programme)")
             report["devices_created"] += 1
             if dry_run:
                 if interfaces:
@@ -207,6 +275,9 @@ class ClientSyncEngine:
                 payload["serial"] = serial
             if tenant_id:
                 payload["tenant"] = tenant_id
+            report_text = inventory_report(client)
+            if report_text:
+                payload["comments"] = merge_report("", report_text)
             device = self.nb.dcim.devices.create(payload)
             self.existing[name.casefold()] = device.id
         elif not update_existing:
@@ -226,6 +297,11 @@ class ClientSyncEngine:
             if tenant_id and related_id(device, "tenant") is None:
                 updates["tenant"] = tenant_id
                 changes.append("Mandant setzen")
+            report_text = inventory_report(client)
+            current = getattr(device, "comments", "") or ""
+            if report_text and _without_timestamp(_report_body(current)) != _without_timestamp(report_text):
+                updates["comments"] = merge_report(current, report_text)
+                changes.append(f"Inventarbericht aktualisieren ({len(client.get('software') or [])} Programme)")
             if updates:
                 report["devices_updated"] += 1
                 if not dry_run:
