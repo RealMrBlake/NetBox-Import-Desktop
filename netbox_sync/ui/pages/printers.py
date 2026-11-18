@@ -34,7 +34,7 @@ from netbox_sync.ui.widgets import (
     label,
 )
 
-MODEL_ACTIONS = (("create", "Gerätetyp neu anlegen"), ("map", "Vorhandenen Gerätetyp verwenden"),
+MODEL_ACTIONS = (("map", "Vorhandenen Gerätetyp verwenden"),
                  ("skip", "Diesmal überspringen"), ("ignore", "Dauerhaft ignorieren"))
 AUTH_CHOICES = ["", *snmp.AUTH_PROTOCOLS]
 PRIV_CHOICES = ["", *snmp.PRIV_PROTOCOLS]
@@ -196,9 +196,9 @@ class ModelMappingDialog(_Dialog):
 
     def __init__(self, parent, rows, device_types):
         super().__init__(parent, "Modelle zuordnen",
-                         "Diese Modelle gibt es in NetBox noch nicht als Gerätetyp. Pro Modell: neu anlegen, einen "
-                         "vorhandenen Gerätetyp verwenden, die Drucker dieses Modells diesmal überspringen oder dauerhaft "
-                         "ignorieren (gespeichert im Profil).", width=900)
+                         "Diese Modelle gibt es in NetBox nicht als Gerätetyp. Gerätetypen werden nicht automatisch "
+                         "angelegt – pro Modell einen vorhandenen Gerätetyp wählen, die Drucker dieses Modells diesmal "
+                         "überspringen oder dauerhaft ignorieren (gespeichert im Profil).", width=900)
         self.resize(1040, 520)
         type_items = [(f"{row['manufacturer']} {row['model']}".strip(), row["id"]) for row in device_types]
         self.table = QTableWidget(0, 4)
@@ -214,7 +214,7 @@ class ModelMappingDialog(_Dialog):
                 action.addItem(caption, value)
             device_type = SearchableComboBox("Gerätetyp suchen …")
             device_type.set_items(type_items, decision.get("device_type") or suggestion)
-            chosen = decision.get("action") or ("map" if suggestion else "create")
+            chosen = decision.get("action") if decision.get("action") in dict(MODEL_ACTIONS) else "map"
             action.setCurrentIndex(next(index for index, (value, _c) in enumerate(MODEL_ACTIONS) if value == chosen))
             action.currentIndexChanged.connect(lambda _i, a=action, d=device_type: d.setEnabled(a.currentData() == "map"))
             device_type.setEnabled(chosen == "map")
@@ -257,6 +257,8 @@ class PrintersPage(AccessPointsPage):
     key_func = staticmethod(printers.printer_key)
     mapping_header = "Drucker (IP, Modell, SNMP-Standort)"
     mapping_noun = "Drucker"
+    mapping_options = {"empty_rows": "Ohne Standort und Mandant gilt der Standard-Standort mit seinem Mandanten; "
+                                     "Drucker auslassen geht per Rechtsklick in der Tabelle."}
 
     def __init__(self, window):  # noqa: PLR0915 - builds the page
         Page.__init__(self, window)
@@ -542,6 +544,17 @@ class PrintersPage(AccessPointsPage):
                  ("ap", self.key_func(printer)), self._placement(printer))
                 for printer in sorted(new, key=lambda item: tuple(int(part) for part in item["ip"].split(".")))]
 
+    def _placement(self, printer):
+        # Printers are left out via the context menu; a row without site and tenant
+        # goes to the default site (with its tenant) instead of being dropped.
+        return dict(super()._placement(printer), ignored=False)
+
+    def _tenant_for(self, placement):
+        if placement.get("tenant") or placement.get("site") or not self.engine:
+            return placement.get("tenant")
+        site = next((row for row in self.engine.ap_sites if row["id"] == self.default_site.valid_data()), None)
+        return (site or {}).get("tenant_id")
+
     def _suggest_role(self, roles):
         return next((role_id for name, role_id in roles
                      if any(hint in name.casefold() for hint in self.role_hints)), None)
@@ -573,7 +586,9 @@ class PrintersPage(AccessPointsPage):
         return set(self._settings().get("ignored") or [])
 
     def _model_decisions(self):
-        return dict(self._settings().get("models") or {})
+        # "create" (stored by older versions) is no longer offered and counts as undecided
+        return {key: value for key, value in (self._settings().get("models") or {}).items()
+                if value.get("action") in dict(MODEL_ACTIONS)}
 
     def _model_action(self, printer):
         key = printers.model_key(printer)
@@ -688,8 +703,6 @@ class PrintersPage(AccessPointsPage):
                     name = next((f"{row['manufacturer']} {row['model']}" for row in self.engine.device_types
                                  if row["id"] == decision.get("device_type")), "?")
                     printer["issues"].append(f"Modell nicht in NetBox – wird als „{name}“ angelegt")
-                elif decision.get("action") == "create":
-                    printer["issues"].append("Modell nicht in NetBox – Gerätetyp wird neu angelegt")
                 else:
                     printer["issues"].append("Modell nicht in NetBox – bitte unter „Modelle …“ entscheiden")
         super()._refresh()

@@ -48,11 +48,12 @@ class SiteMappingDialog(_Dialog):
     """Assign an optional NetBox site and the mandatory tenant to Sophos sites
     and to APs without a Sophos site."""
 
-    def __init__(self, parent, rows, sites, tenants, header="Sophos-Standort / Access Point", noun="APs"):
+    def __init__(self, parent, rows, sites, tenants, header="Sophos-Standort / Access Point", noun="APs",
+                 empty_rows="Zeilen ohne Standort und ohne Mandant werden ignoriert."):
         super().__init__(parent, "Standorte & Mandanten zuordnen",
                          f"Der Standort ist optional – {noun} ohne Zuordnung kommen an den Standard-Standort, weil NetBox "
-                         "für jedes Gerät einen Standort verlangt. Der Mandant ist Pflicht und wird bewusst gewählt. Zeilen ohne "
-                         "Standort und ohne Mandant werden ignoriert.",
+                         "für jedes Gerät einen Standort verlangt. Der Mandant ist Pflicht und wird bewusst gewählt. "
+                         + empty_rows,
                          width=860)
         self.resize(980, 620)
         site_items = [("– kein Standort (Standard-Standort) –", 0)] + [
@@ -109,6 +110,7 @@ class AccessPointsPage(Page):
     key_func = staticmethod(ap_key)
     mapping_header = "Sophos-Standort / Access Point"
     mapping_noun = "APs"
+    mapping_options = {}
     subtitle = ("Sophos-APs aus einem Export von Sophos Central laden, mit NetBox abgleichen (global über "
                 "Seriennummer, MAC und Name) und fehlende anlegen.")
 
@@ -257,14 +259,23 @@ class AccessPointsPage(Page):
 
         def work(ctx):
             nb = connect(ctx)
-            ctx.log("Lade Geräterollen …")
-            return sorted(((item.name, item.id) for item in nb.dcim.device_roles.all()), key=lambda x: x[0].casefold())
+            ctx.log("Lade Geräterollen und Standorte …")
+            roles = sorted(((item.name, item.id) for item in nb.dcim.device_roles.all()), key=lambda x: x[0].casefold())
+            tenants = {item.id: item.name for item in nb.tenancy.tenants.all()}
+            sites = sorted(((site.name + (f" ({tenants[related_id(site, 'tenant')]})"
+                                          if related_id(site, "tenant") in tenants else ""), site.id)
+                            for site in nb.dcim.sites.all()), key=lambda x: x[0].casefold())
+            return roles, sites
 
-        def done(roles):
+        def done(result):
+            roles, sites = result
             self.roles = roles
             settings = self._settings()
             role_id = settings.get("role_id") or self._suggest_role(roles)
             self.role.set_items(roles, role_id)
+            # the default site can be chosen before the first comparison
+            if not self.engine:
+                self.default_site.set_items(sites, settings.get("default_site"))
             if then_compare:
                 QTimer.singleShot(0, self.compare)
 
@@ -434,7 +445,7 @@ class AccessPointsPage(Page):
             self.window.toast(f"Alle {self.noun} sind bereits in NetBox.", "info")
             return False
         dialog = SiteMappingDialog(self.window, rows, self.engine.ap_sites, self.engine.group_tenants,
-                                   self.mapping_header, self.mapping_noun)
+                                   self.mapping_header, self.mapping_noun, **self.mapping_options)
         if not dialog.exec():
             return False
         settings = self._settings()

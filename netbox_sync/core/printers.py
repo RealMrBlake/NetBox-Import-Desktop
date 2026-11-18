@@ -398,6 +398,20 @@ class PrinterSyncEngine(APSyncEngine):
     def _mapped_type(self, printer):
         return self.type_map.get(model_key(printer))
 
+    # Printer device types are never created: only existing or manually chosen ones are used.
+
+    def _manufacturer(self, name, report, dry_run):
+        return None
+
+    def _device_type(self, manufacturer_name, manufacturer_id, model, report, dry_run):
+        hp = "hewlett-packard" if manufacturer_name.casefold() == "hp" else ""
+        found = next((row["id"] for row in self.device_types if row["model"].casefold() == model.casefold()
+                      and row["manufacturer"].casefold() in (manufacturer_name.casefold(), hp)), None)
+        if found is None:
+            raise PrinterError(f"Gerätetyp „{manufacturer_name} {model}“ fehlt in NetBox – bitte unter "
+                               "„Modelle …“ einen vorhandenen Gerätetyp wählen")
+        return found
+
     def _known_devices(self, scope):
         if not self.role_id:
             return []

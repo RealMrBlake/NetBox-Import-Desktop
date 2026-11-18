@@ -126,6 +126,9 @@ def test_sync_creates_fields_and_printers_and_updates_counters(agent):
     known = to_import(dict(info, ip="10.20.0.60", snmp="SNMPv2c", notes=[], serial="", mac="",
                            name="Drucker EG", page_count=200))
     nb = _netbox()
+    nb.dcim.manufacturers.records.append(Record(nb.dcim.manufacturers, id=50, name="HP", slug="hp"))
+    nb.dcim.device_types.records.append(Record(nb.dcim.device_types, id=61, model="Color LaserJet Pro M454dw",
+                                               manufacturer=SimpleNamespace(id=50, name="HP")))
     engine = PrinterSyncEngine(nb, role_id=31)
     engine.load_context(7)
     items = [new, known]
@@ -142,8 +145,8 @@ def test_sync_creates_fields_and_printers_and_updates_counters(agent):
     created = nb.dcim.devices.created[-1]
     assert created["name"] == "NPI1A2B3C" and created["serial"] == "VNB3K12345" and "platform" not in created
     assert created["custom_fields"]["printer_page_count"] == 48211 and created["custom_fields"]["printer_color"]
-    assert nb.dcim.manufacturers.created[0]["name"] == "HP"
-    assert nb.dcim.device_types.created[0]["model"] == "Color LaserJet Pro M454dw"
+    assert created["device_type"] == 61
+    assert nb.dcim.manufacturers.created == [] and nb.dcim.device_types.created == []
     assert nb.ipam.ip_addresses.created[-1]["address"] == f"{IP}/24"
     assert nb.dcim.devices.get(201).custom_fields["printer_page_count"] == 200
 
@@ -181,3 +184,18 @@ def test_missing_model_can_be_mapped_to_an_existing_device_type():
     report = engine.sync([printer], {printer_key(printer): {"site": 21, "tenant": 7}}, role_id=31, dry_run=False)
     assert report["errors"] == [] and nb.dcim.device_types.created == []
     assert nb.dcim.devices.created[-1]["device_type"] == 60
+
+
+def test_missing_device_type_is_never_created():
+    nb = _netbox()
+    printer = to_import({"ip": "10.20.0.71", "name": "Drucker25", "manufacturer": "Kyocera", "model": "ECOSYS M5526",
+                         "serial": "", "mac": "", "snmp": "SNMPv2c", "notes": []})
+    engine = PrinterSyncEngine(nb, role_id=31, counters=False)
+    engine.load_context(7)
+    engine.match([printer])
+    for dry_run in (True, False):
+        report = engine.sync([printer], {printer_key(printer): {"site": 21, "tenant": 7}}, role_id=31,
+                             dry_run=dry_run, default_site=21)
+        assert len(report["errors"]) == 1 and "fehlt in NetBox" in report["errors"][0]
+    assert nb.dcim.manufacturers.created == [] and nb.dcim.device_types.created == []
+    assert nb.dcim.devices.created == []
