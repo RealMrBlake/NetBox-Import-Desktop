@@ -246,8 +246,13 @@ class ClientSyncEngine:
                     self.log(f"netbox-inventory nicht verfügbar – Assets werden übersprungen ({error})", "info")
         return self._asset_endpoint
 
-    def _sync_asset(self, client, device, type_id, dry_run, report):
-        """Create or update the inventory asset of a client (found by serial number)."""
+    def _sync_asset(self, client, device, type_id, dry_run, report, tenant_id=None):
+        """Create or update the inventory asset of a client (found by serial number).
+
+        The asset gets the tenant of the transfer or of the device – NetBox installations with a
+        validator that requires a tenant on every object reject assets without one.
+        """
+        tenant_id = tenant_id or (related_id(device, "tenant") if device is not None else None)
         endpoint = self.asset_endpoint()
         serial = clean_serial(client.get("serial"))
         if endpoint is None or not serial:
@@ -264,6 +269,8 @@ class ClientSyncEngine:
                            "description": description}
                 if device is not None:
                     payload["device"] = device.id
+                if tenant_id:
+                    payload["tenant"] = tenant_id
                 if report_text:
                     payload["comments"] = merge_report("", report_text)
                 endpoint.create(payload)
@@ -278,6 +285,8 @@ class ClientSyncEngine:
             updates["device_type"] = type_id
         if device is not None and related_id(asset, "device") != device.id:
             updates["device"] = device.id
+        if tenant_id and related_id(asset, "tenant") is None:
+            updates["tenant"] = tenant_id
         if client.get("uuid") and (getattr(asset, "description", "") or "") != description:
             updates["description"] = description
         current = getattr(asset, "comments", "") or ""
@@ -288,7 +297,7 @@ class ClientSyncEngine:
         report["assets_updated"] += 1
         if not dry_run:
             asset.update(updates)
-        labels = {"name": "Name", "status": "Status", "device_type": "Gerätetyp", "device": "Gerät",
+        labels = {"name": "Name", "status": "Status", "device_type": "Gerätetyp", "device": "Gerät", "tenant": "Mandant",
                   "description": "UUID", "comments": "Inventarbericht"}
         return ["Asset aktualisieren: " + ", ".join(labels[key] for key in updates)]
 
@@ -329,7 +338,7 @@ class ClientSyncEngine:
                 changes.append(f"Inventarbericht in den Kommentaren ({len(client.get('software') or [])} Programme)")
             report["devices_created"] += 1
             if dry_run:
-                changes.extend(self._sync_asset(client, None, type_id, dry_run, report))
+                changes.extend(self._sync_asset(client, None, type_id, dry_run, report, tenant_id))
                 if interfaces:
                     for interface in client.get("interfaces", []):
                         changes.append(f"Schnittstelle {interface['name']} anlegen"
@@ -378,7 +387,7 @@ class ClientSyncEngine:
         if interfaces:
             changes.extend(self._sync_interfaces(device, client, tenant_id, dry_run, report))
         try:
-            changes.extend(self._sync_asset(client, device, type_id, dry_run, report))
+            changes.extend(self._sync_asset(client, device, type_id, dry_run, report, tenant_id))
         except Exception as error:  # noqa: BLE001 - the device itself is fine; report the asset problem
             report["errors"].append(f"{name}: Asset – {error}")
             changes.append(f"Asset fehlgeschlagen: {error}")

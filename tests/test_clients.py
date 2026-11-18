@@ -316,3 +316,25 @@ def test_without_inventory_plugin_no_asset_is_touched():
     engine.load_targets()
     report = engine.sync([client], 1, 2, dry_run=False)
     assert report["errors"] == [] and report["assets_created"] == 0 and engine.asset_endpoint() is None
+
+
+def test_asset_gets_the_tenant_of_the_transfer_or_the_device():
+    from types import SimpleNamespace
+    nb, client = _setup()
+    assets = _with_inventory_plugin(nb)
+    engine = ClientSyncEngine(nb)
+    engine.load_targets()
+    engine.sync([client], 1, 2, tenant_id=7, dry_run=False)
+    assert assets.created[0]["tenant"] == 7
+
+    # an existing device keeps its tenant; an asset without tenant gets the device's one
+    nb2, client2 = _setup()
+    assets2 = _with_inventory_plugin(nb2)
+    nb2.dcim.devices.records.append(Record(nb2.dcim.devices, id=300, name="PC01", tenant=SimpleNamespace(id=9),
+                                           device_type=None, platform=None, serial="", primary_ip4=None))
+    assets2.records.append(Record(assets2, id=501, name="PC01", serial="PW0K84A9", status="used", device=None,
+                                  device_type=None, tenant=None, description="", comments=""))
+    again = ClientSyncEngine(nb2)
+    again.load_targets()
+    report = again.sync([client2], 1, 2, dry_run=False)
+    assert report["errors"] == [] and assets2.records[0].tenant == 9 and assets2.records[0].device == 300
