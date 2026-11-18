@@ -198,7 +198,7 @@ class PrintersPage(AccessPointsPage):
     source_name = "Scan"
     role_hints = printers.ROLE_HINTS
     key_func = staticmethod(printers.printer_key)
-    mapping_header = "SNMP-Standort / Drucker"
+    mapping_header = "Drucker (IP, Modell, SNMP-Standort)"
     mapping_noun = "Drucker"
 
     def __init__(self, window):  # noqa: PLR0915 - builds the page
@@ -211,6 +211,7 @@ class PrintersPage(AccessPointsPage):
         self.scan_task = None
         self.others = []
         self._engine_args = {}
+        self._compare_after_scan = False
 
         source = Card("Scan", "Erreichbare Adressen werden per SNMP abgefragt; Geräte nur mit offenem Druckerport "
                               "(9100/IPP/LPD) erscheinen als „ohne SNMP“.")
@@ -242,7 +243,7 @@ class PrintersPage(AccessPointsPage):
                                  "einen.", muted=True), 1)
         form.addRow("Standard-Standort", site_row)
         options = QHBoxLayout()
-        self.counters = checkbox("Seitenzähler & Verbrauchsmaterial in NetBox speichern", True,
+        self.counters = checkbox("Seitenzähler && Verbrauchsmaterial in NetBox speichern", True,
                                  tooltip="Benutzerdefinierte Felder am Gerät (werden bei Bedarf angelegt): "
                                          "Seitenzähler, Verbrauchsmaterial, Farbdrucker, letzter Scan")
         self.rename = checkbox("Namen vorhandener Geräte aus SNMP übernehmen", False,
@@ -446,12 +447,12 @@ class PrintersPage(AccessPointsPage):
             self.file_name = ""
             without = sum(1 for item in items if not item.get("snmp"))
             text = f"{len(items)} Drucker gefunden" + (f", {without} ohne SNMP" if without else "") + (
-                f", {len(self.others)} Geräte mit SNMP-Problemen (siehe Protokoll)" if self.others else "")
+                f", {len(self.others)} Gerät{'e' if len(self.others) != 1 else ''} mit SNMP-Problemen (siehe Protokoll)" if self.others else "")
             logger("app").log(25, "Drucker-Scan: %s", text)
             self.window.toast(text, "warning" if self.others or without else "success")
             self._refresh()
-            if self._netbox_ready() and items:
-                self._load_lists(then_compare=True)
+            # The scan task is still current here; the comparison starts once it has ended.
+            self._compare_after_scan = self._netbox_ready() and bool(items)
 
         self.scan_task = self.tasks.run(work, title=f"{len(ips)} Adressen nach Druckern scannen", area="app",
                                         on_success=finished, on_error=lambda error: widgets.error(
@@ -462,10 +463,20 @@ class PrintersPage(AccessPointsPage):
     def _scan_ended(self):
         self.scan_task = None
         self.set_busy(self.tasks.busy)
+        if self._compare_after_scan:
+            self._compare_after_scan = False
+            self._load_lists(then_compare=True)
 
     # ------------------------------------------------------------------
     # NetBox
     # ------------------------------------------------------------------
+
+    def _mapping_rows(self, new):
+        """One row per printer – preset with the choice for its SNMP location, if any."""
+        return [(" · ".join(filter(None, (printer["name"], printer["ip"], printer.get("model"))))
+                 + (f" (SNMP-Standort: {printer['site_hint']})" if printer["site_hint"] else ""), 1,
+                 ("ap", self.key_func(printer)), self._placement(printer))
+                for printer in sorted(new, key=lambda item: tuple(int(part) for part in item["ip"].split(".")))]
 
     def _suggest_role(self, roles):
         return next((role_id for name, role_id in roles
@@ -491,4 +502,5 @@ class PrintersPage(AccessPointsPage):
     def _refresh(self):
         super()._refresh()
         if self.others and self.summary.text():
-            self.summary.setText(self.summary.text() + f" · {len(self.others)} Geräte mit SNMP-Problemen")
+            count = len(self.others)
+            self.summary.setText(self.summary.text() + f" · {count} Gerät{'e' if count != 1 else ''} mit SNMP-Problemen")

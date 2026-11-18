@@ -408,10 +408,8 @@ class AccessPointsPage(Page):
     def _prepare_sync(self):
         return self.engine
 
-    def map_sites(self):
-        if not self.engine:
-            return False
-        new = self._new_aps()
+    def _mapping_rows(self, new):
+        """``(text, count, (kind, key), placement)`` per Sophos site, plus APs without one."""
         groups = {}
         for ap in new:
             if ap["site_hint"]:
@@ -421,6 +419,12 @@ class AccessPointsPage(Page):
         rows += [(f"{ap['name']} (ohne {self.source_name}-Standort)", 1, ("ap", self.key_func(ap)),
                   self._placement(ap))
                  for ap in new if not ap["site_hint"]]
+        return rows
+
+    def map_sites(self):
+        if not self.engine:
+            return False
+        rows = self._mapping_rows(self._new_aps())
         if not rows:
             self.window.toast(f"Alle {self.noun} sind bereits in NetBox.", "info")
             return False
