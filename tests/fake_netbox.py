@@ -84,3 +84,4 @@ class FakeNetBox:
         self.virtualization = SimpleNamespace(clusters=Endpoint(), cluster_types=Endpoint(), virtual_machines=Endpoint(),
                                             interfaces=Endpoint())
         self.tenancy = SimpleNamespace(tenants=Endpoint())
+        self.extras = SimpleNamespace(custom_fields=Endpoint())

@@ -152,6 +152,30 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
   firmware, interface with MAC and IP address (primary IPv4); existing ones get
   missing serial numbers and tenants, optionally the Sophos name. Preview before
   writing
+- IP addresses go into the VRF of the most specific matching prefix of the
+  tenant (group), otherwise global
+
+### Printers (SNMP scan)
+
+- Scans IP ranges for printers of any manufacturer via the standard Host
+  Resources and Printer MIBs (RFC 3805); hosts that do not answer ping are
+  still probed on the printer ports 9100/631/515
+- SNMPv2c communities and SNMPv3 users (MD5, SHA-1, SHA-224/256/384/512; DES,
+  AES-128/192/256) are stored per profile (secrets encrypted with DPAPI) and
+  tried in order; the credential that worked is remembered per address and
+  tried first next time. Rejected SNMPv3 logins are explained (unknown user,
+  wrong password, wrong privacy settings)
+- Reads name, location, contact, manufacturer (from sysObjectID), model,
+  serial number, firmware, MAC address, netmask, page counter, colour
+  capability, supplies (toner, drum, waste toner, fuser … with fill level),
+  paper trays, status, error flags, display text and alerts
+- Devices with open printer ports but no SNMP answer are listed as
+  "without SNMP"
+- Same workflow as the access point import: matching by serial number, MAC
+  address, name and IP address, site/tenant mapping by SNMP location, default
+  site, preview before writing
+- Optionally stores page counter, supplies, colour capability and scan date in
+  custom fields of the device (created on first transfer, group "Drucker")
 
 ### Network scanner (read only)
 

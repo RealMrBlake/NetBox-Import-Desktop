@@ -141,9 +141,7 @@ class APSyncEngine(ClientSyncEngine):
             self.ap_sites = sorted(({"id": site.id, "name": site.name, "tenant_id": related_id(site, "tenant"),
                                      "tenant": tenants.get(related_id(site, "tenant"), "")}
                                     for site in self.nb.dcim.sites.all()), key=lambda row: row["name"].casefold())
-            manufacturer = (self.nb.dcim.manufacturers.get(slug="sophos")
-                            or next(iter(self.nb.dcim.manufacturers.filter(name__ie=MANUFACTURER)), None))
-            self.netbox_aps = list(self.nb.dcim.devices.filter(manufacturer_id=manufacturer.id)) if manufacturer else []
+            self.netbox_aps = self._known_devices({})
             return self.ap_sites
         tenant = self.nb.tenancy.tenants.get(tenant_id)
         if tenant is None:
@@ -161,11 +159,26 @@ class APSyncEngine(ClientSyncEngine):
                                 for site in self.nb.dcim.sites.filter(**scope)), key=lambda row: row["name"].casefold())
         self.roles = sorted(((item.name, item.id) for item in self.nb.dcim.device_roles.all()),
                             key=lambda pair: pair[0].casefold())
+        self.netbox_aps = self._known_devices(scope)
+        return self.ap_sites
+
+    def _known_devices(self, scope):
+        """Devices of this kind in NetBox (``scope`` limits them to the tenant group)."""
         manufacturer = (self.nb.dcim.manufacturers.get(slug="sophos")
                         or next(iter(self.nb.dcim.manufacturers.filter(name__ie=MANUFACTURER)), None))
-        self.netbox_aps = list(self.nb.dcim.devices.filter(manufacturer_id=manufacturer.id, **scope)) \
-            if manufacturer else []
-        return self.ap_sites
+        return list(self.nb.dcim.devices.filter(manufacturer_id=manufacturer.id, **scope)) if manufacturer else []
+
+    def _identity(self, ap):
+        """``(manufacturer, model, platform or None)`` of a new device."""
+        return MANUFACTURER, ap["model"] or "Access Point", PLATFORM
+
+    def _extra_payload(self, ap):
+        """Additional fields for a new device."""
+        return {}
+
+    def _extra_updates(self, device, ap):
+        """Additional field changes for an existing device: ``(updates, change texts)``."""
+        return {}, []
 
     def suggest_site(self, hint):
         """NetBox site for a Sophos site name, or ``None`` when unclear."""
@@ -292,11 +305,13 @@ class APSyncEngine(ClientSyncEngine):
             if description and (getattr(device, "description", "") or "").startswith("Firmware") \
                     and device.description != description:
                 updates["description"] = description
+            extra, extra_texts = self._extra_updates(device, ap)
+            updates.update(extra)
             if updates:
                 report["devices_updated"] += 1
                 changes.append("Aktualisieren: " + ", ".join(
-                    f"{key} → {value}" for key, value in updates.items() if key != "tenant")
-                    + (" (Mandant ergänzt)" if "tenant" in updates else ""))
+                    [f"{key} → {value}" for key, value in updates.items() if key not in ("tenant", *extra)]
+                    + extra_texts) + (" (Mandant ergänzt)" if "tenant" in updates else ""))
                 if not dry_run:
                     device.update(updates)
             else:
@@ -309,19 +324,23 @@ class APSyncEngine(ClientSyncEngine):
                                     "Standard-Standort wählen")
             if not role_id:
                 raise APImportError("keine Geräterolle gewählt")
-            manufacturer_id = self._manufacturer(MANUFACTURER, report, dry_run)
-            type_id = self._device_type(MANUFACTURER, manufacturer_id, ap["model"] or "Access Point", report, dry_run)
-            platform_id = self._platform(PLATFORM, report, dry_run)
+            manufacturer, model, platform = self._identity(ap)
+            manufacturer_id = self._manufacturer(manufacturer, report, dry_run)
+            type_id = self._device_type(manufacturer, manufacturer_id, model, report, dry_run)
+            platform_id = self._platform(platform, report, dry_run) if platform else None
             # An explicitly chosen tenant wins, otherwise the one of the site.
             tenant_id = placement.get("tenant") or self._site_tenant(site_id)
             payload = {"name": ap["name"], "device_type": type_id, "role": role_id, "site": site_id,
-                       "tenant": tenant_id, "status": "active", "platform": platform_id}
+                       "tenant": tenant_id, "status": "active"}
+            if platform:
+                payload["platform"] = platform_id
             if ap["serial"]:
                 payload["serial"] = ap["serial"]
             if description:
                 payload["description"] = description
+            payload.update(self._extra_payload(ap))
             report["devices_created"] += 1
-            changes.append(f"Gerät anlegen ({ap['model'] or 'Access Point'})")
+            changes.append(f"Gerät anlegen ({model})")
             if dry_run:
                 if ap["mac"] or ap["ip"]:
                     report["interfaces_created"] += 1
@@ -379,7 +398,7 @@ class APSyncEngine(ClientSyncEngine):
         if not ap["ip"]:
             return changes
         prefix = self._prefix_for(ap["ip"], tenant_id)
-        length = str(getattr(prefix, "prefix", "")).split("/")[-1] if prefix else "32"
+        length = str(getattr(prefix, "prefix", "")).split("/")[-1] if prefix else str(ap.get("prefix_length") or 32)
         vrf_id = related_id(prefix, "vrf") if prefix else None
         address = f"{ap['ip']}/{length}"
         where = f" (VRF {getattr(getattr(prefix, 'vrf', None), 'name', vrf_id)})" if vrf_id else ""

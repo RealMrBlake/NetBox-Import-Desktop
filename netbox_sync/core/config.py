@@ -11,7 +11,7 @@ from pathlib import Path
 from netbox_sync import CONFIG_DIR_NAME
 from netbox_sync.core.clients import DEFAULT_CLIENT_OPTIONS
 
-SECRET_KEYS = ("password", "token_secret")
+SECRET_KEYS = ("password", "token_secret", "community", "auth_password", "priv_password")
 CONFIG_VERSION = 5
 
 DEFAULT_SETTINGS = {
@@ -127,6 +127,10 @@ def empty_profile(name):
         # Sophos AP import: tenant, role, rename option and site choices
         # ("site_map": Sophos site -> NetBox site ID, "ap_sites": AP key -> NetBox site ID).
         "access_points": {},
+        # SNMP printer scan: targets, role, site choices and remembered credential per address.
+        "printers": {},
+        # SNMP credentials (v2c communities and v3 users) – secrets encrypted.
+        "snmp_credentials": [],
         # Windows client scan: targets and options, never a password.
         "clients": dict(DEFAULT_CLIENT_OPTIONS),
     }
@@ -178,11 +182,14 @@ class ProfileStore:
                 "vlan_map": dict(record.get("vlan_map", {})),
                 "network_map": dict(record.get("network_map", {})),
                 "access_points": dict(record.get("access_points", {})),
+                "printers": dict(record.get("printers", {})),
                 "clients": {**DEFAULT_CLIENT_OPTIONS, **{key: value for key, value in record.get("clients", {}).items()
                                                          if key in DEFAULT_CLIENT_OPTIONS}},
             })
             for source in record.get("sources", []):
                 profile["sources"].append(self._decrypt_record(source, f"{name}: {source.get('name', 'Quelle')}"))
+            for credential in record.get("snmp_credentials", []):
+                profile["snmp_credentials"].append(self._decrypt_record(credential, f"{name}: SNMP"))
             for switch in record.get("switches", []):
                 profile["switches"].append(self._decrypt_record(switch, f"{name}: {switch.get('name', 'Switch')}"))
             # Migration from 4.5/4.6: VLAN and network decisions were stored per switch.
@@ -254,6 +261,8 @@ class ProfileStore:
                 "vlan_map": dict(profile.get("vlan_map", {})),
                 "network_map": dict(profile.get("network_map", {})),
                 "access_points": dict(profile.get("access_points", {})),
+                "printers": dict(profile.get("printers", {})),
+                "snmp_credentials": [self._encrypt_record(item) for item in profile.get("snmp_credentials", [])],
                 "clients": dict(profile.get("clients", DEFAULT_CLIENT_OPTIONS)),
             })
 

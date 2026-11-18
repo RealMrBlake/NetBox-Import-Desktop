@@ -48,9 +48,9 @@ class SiteMappingDialog(_Dialog):
     """Assign an optional NetBox site and the mandatory tenant to Sophos sites
     and to APs without a Sophos site."""
 
-    def __init__(self, parent, rows, sites, tenants):
+    def __init__(self, parent, rows, sites, tenants, header="Sophos-Standort / Access Point", noun="APs"):
         super().__init__(parent, "Standorte & Mandanten zuordnen",
-                         "Der Standort ist optional – APs ohne Zuordnung kommen an den Standard-Standort, weil NetBox "
+                         f"Der Standort ist optional – {noun} ohne Zuordnung kommen an den Standard-Standort, weil NetBox "
                          "für jedes Gerät einen Standort verlangt. Der Mandant ist Pflicht und wird bewusst gewählt. Zeilen ohne "
                          "Standort und ohne Mandant werden ignoriert.",
                          width=860)
@@ -59,7 +59,7 @@ class SiteMappingDialog(_Dialog):
             (site["name"] + (f" ({site['tenant']})" if site["tenant"] else ""), site["id"]) for site in sites]
         tenant_items = [(tenant["name"], tenant["id"]) for tenant in tenants]
         self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["Sophos-Standort / Access Point", "APs", "NetBox-Standort (optional)",
+        self.table.setHorizontalHeaderLabels([header, noun, "NetBox-Standort (optional)",
                                               "Mandant *"])
         self.rows = []
         for text, count, key, current in rows:
@@ -101,6 +101,14 @@ class SiteMappingDialog(_Dialog):
 
 class AccessPointsPage(Page):
     title = "Access Points"
+    # Overridden by pages that reuse this workflow (printers).
+    settings_key = "access_points"
+    noun = "Access Points"
+    source_name = "Sophos"
+    role_hints = ROLE_HINTS
+    key_func = staticmethod(ap_key)
+    mapping_header = "Sophos-Standort / Access Point"
+    mapping_noun = "APs"
     subtitle = ("Sophos-APs aus einem Export von Sophos Central laden, mit NetBox abgleichen (global über "
                 "Seriennummer, MAC und Name) und fehlende anlegen.")
 
@@ -194,7 +202,7 @@ class AccessPointsPage(Page):
     # ------------------------------------------------------------------
 
     def _settings(self):
-        return self.state.profile.setdefault("access_points", {}) if self.state.profile else {}
+        return self.state.profile.setdefault(self.settings_key, {}) if self.state.profile else {}
 
     def _store(self, **values):
         if self.state.profile is None:
@@ -255,15 +263,20 @@ class AccessPointsPage(Page):
         def done(roles):
             self.roles = roles
             settings = self._settings()
-            role_id = settings.get("role_id") or next(
-                (role_id for name, role_id in roles if name.casefold() in ROLE_HINTS
-                 or "access point" in name.casefold()), None)
+            role_id = settings.get("role_id") or self._suggest_role(roles)
             self.role.set_items(roles, role_id)
             if then_compare:
                 QTimer.singleShot(0, self.compare)
 
         self.tasks.run(work, title="Geräterollen laden", area="app", on_success=done,
                        on_error=self.actions._netbox_failed)
+
+    def _suggest_role(self, roles):
+        return next((role_id for name, role_id in roles if name.casefold() in self.role_hints
+                     or "access point" in name.casefold()), None)
+
+    def _make_engine(self, nb, log):
+        return APSyncEngine(nb, log)
 
     def compare(self):
         if not self.aps or self.tasks.busy:
@@ -274,10 +287,10 @@ class AccessPointsPage(Page):
                for ap in self.aps]
 
         def work(ctx):
-            engine = APSyncEngine(connect(ctx), ctx.log)
-            ctx.log("Lade Standorte, Mandanten und vorhandene Sophos-Geräte …")
+            engine = self._make_engine(connect(ctx), ctx.log)
+            ctx.log("Lade Standorte, Mandanten und vorhandene Geräte …")
             engine.load_context()
-            ctx.log(f"Suche {len(aps)} Access Points in NetBox (Seriennummer, MAC, Name) …")
+            ctx.log(f"Suche {len(aps)} {self.noun} in NetBox …")
             only_netbox = engine.match(aps)
             return engine, aps, only_netbox
 
@@ -287,11 +300,11 @@ class AccessPointsPage(Page):
                                           site["id"]) for site in self.engine.ap_sites],
                                         self._settings().get("default_site"))
             found = sum(1 for ap in self.aps if ap.get("device"))
-            logger("app").log(25, "Abgleich: %s von %s APs in NetBox, %s nur in NetBox", found, len(self.aps),
-                              len(self.only_netbox))
+            logger("app").log(25, "Abgleich: %s von %s %s in NetBox, %s nur in NetBox", found, len(self.aps),
+                              self.noun, len(self.only_netbox))
             self._refresh()
 
-        self.tasks.run(work, title="Access Points abgleichen", area="app", on_success=done,
+        self.tasks.run(work, title=f"{self.noun} abgleichen", area="app", on_success=done,
                        on_error=self.actions._netbox_failed)
 
     # ------------------------------------------------------------------
@@ -301,7 +314,7 @@ class AccessPointsPage(Page):
     def _placement(self, ap):
         """Site (optional) and tenant for a new AP: stored choice, else the suggestion."""
         settings = self._settings()
-        stored = (settings.get("ap_sites") or {}).get(ap_key(ap)) or (settings.get("site_map") or {}).get(
+        stored = (settings.get("ap_sites") or {}).get(self.key_func(ap)) or (settings.get("site_map") or {}).get(
             ap["site_hint"])
         if stored:
             value = placement_value(stored)
@@ -343,7 +356,7 @@ class AccessPointsPage(Page):
             else:
                 site_name = ""
             state = ("ignored" if self.engine and self._placement(ap)["ignored"] else "new") if not device                 else ("check" if ap["issues"] else "known")
-            rows.append(dict(ap, key=ap_key(ap), state=state if self.engine else "", site_id=site_id,
+            rows.append(dict(ap, key=self.key_func(ap), state=state if self.engine else "", site_id=site_id,
                              netbox_site=site_name, tenant=tenant_name or "",
                              netbox_device=device.name if device else "", method=ap.get("method", "")))
         # NetBox APs missing in the export – only for tenants this export is about
@@ -359,11 +372,11 @@ class AccessPointsPage(Page):
                          or self._site_name(related_id(device, "site")),
                          "tenant": self._tenant_name(related_id(device, "tenant")),
                          "netbox_device": device.name, "method": "",
-                         "issues": ["In NetBox, aber nicht im Sophos-Export"]})
+                         "issues": [f"In NetBox, aber nicht im {self.source_name}-Ergebnis"]})
         self.model.set_rows(rows)
         self.stack.setCurrentIndex(1 if rows else 0)
         counts = {key: sum(1 for row in rows if row["state"] == key) for key in STATE_TEXT}
-        parts = [f"{len(self.aps)} Access Points" + (f" aus {self.file_name}" if self.file_name else "")]
+        parts = [f"{len(self.aps)} {self.noun}" + (f" aus {self.file_name}" if self.file_name else "")]
         if self.engine:
             parts += [f"{counts['known']} in NetBox", f"{counts['new']} neu", f"{counts['check']} zu prüfen",
                       f"{counts['netbox_only']} nur in NetBox"]
@@ -392,6 +405,9 @@ class AccessPointsPage(Page):
     def _new_aps(self):
         return [ap for ap in self.aps if not ap.get("device")]
 
+    def _prepare_sync(self):
+        return self.engine
+
     def map_sites(self):
         if not self.engine:
             return False
@@ -402,12 +418,14 @@ class AccessPointsPage(Page):
                 groups.setdefault(ap["site_hint"], []).append(ap)
         rows = [(hint, len(members), ("site", hint), self._placement(members[0]))
                 for hint, members in sorted(groups.items(), key=lambda pair: pair[0].casefold())]
-        rows += [(f"{ap['name']} (ohne Sophos-Standort)", 1, ("ap", ap_key(ap)), self._placement(ap))
+        rows += [(f"{ap['name']} (ohne {self.source_name}-Standort)", 1, ("ap", self.key_func(ap)),
+                  self._placement(ap))
                  for ap in new if not ap["site_hint"]]
         if not rows:
-            self.window.toast("Alle Access Points sind bereits in NetBox.", "info")
+            self.window.toast(f"Alle {self.noun} sind bereits in NetBox.", "info")
             return False
-        dialog = SiteMappingDialog(self.window, rows, self.engine.ap_sites, self.engine.group_tenants)
+        dialog = SiteMappingDialog(self.window, rows, self.engine.ap_sites, self.engine.group_tenants,
+                                   self.mapping_header, self.mapping_noun)
         if not dialog.exec():
             return False
         settings = self._settings()
@@ -424,7 +442,7 @@ class AccessPointsPage(Page):
         new = [ap for ap in self._new_aps() if not self._placement(ap)["ignored"]]
         role_id = self.role.valid_data()
         if new and not role_id:
-            widgets.message(self.window, "Geräterolle fehlt", "Für neue Access Points bitte eine Geräterolle wählen.",
+            widgets.message(self.window, "Geräterolle fehlt", f"Für neue {self.noun} bitte eine Geräterolle wählen.",
                             "info")
             return
         if any(not self._placement(ap)["stored"] for ap in new):
@@ -435,16 +453,16 @@ class AccessPointsPage(Page):
         placements = {}
         for ap in new:
             placement = self._placement(ap)
-            placements[ap_key(ap)] = {"site": placement["site"], "tenant": self._tenant_for(placement)}
-        homeless = [ap["name"] for ap in new if not placements[ap_key(ap)]["site"]]
+            placements[self.key_func(ap)] = {"site": placement["site"], "tenant": self._tenant_for(placement)}
+        homeless = [ap["name"] for ap in new if not placements[self.key_func(ap)]["site"]]
         if homeless and not default_site:
             widgets.message(self.window, "Standard-Standort fehlt",
-                            f"{len(homeless)} neue Access Points haben keinen Standort. NetBox verlangt für jedes "
+                            f"{len(homeless)} neue {self.noun} haben keinen Standort. NetBox verlangt für jedes "
                             "Gerät einen Standort – bitte oben einen Standard-Standort wählen.", "info",
                             "\n".join(homeless))
             return
-        engine, rename = self.engine, self.rename.isChecked()
-        aps = [ap for ap in self.aps if ap.get("device") or ap_key(ap) in placements]
+        engine, rename = self._prepare_sync(), self.rename.isChecked()
+        aps = [ap for ap in self.aps if ap.get("device") or self.key_func(ap) in placements]
 
         def run(dry_run):
             return lambda ctx: engine.sync(aps, placements, role_id, rename, dry_run=dry_run, default_site=default_site)
@@ -452,14 +470,14 @@ class AccessPointsPage(Page):
         def show(report):
             def ask():
                 if ClientPreviewDialog(self.window, report).exec():
-                    self.tasks.run(run(False), title="Access Points übertragen", area="app", on_success=applied,
+                    self.tasks.run(run(False), title=f"{self.noun} übertragen", area="app", on_success=applied,
                                    on_error=self.actions._netbox_failed)
             QTimer.singleShot(0, ask)
 
         def applied(report):
             for error in report["errors"]:
                 logger("app").error("%s", error)
-            text = (f"{report['devices_created']} Access Points angelegt, {report['devices_updated']} aktualisiert"
+            text = (f"{report['devices_created']} {self.noun} angelegt, {report['devices_updated']} aktualisiert"
                     + (f", {len(report['errors'])} Fehler" if report["errors"] else ""))
             logger("app").log(25, "%s", text)
             self.window.toast(text, "warning" if report["errors"] else "success")

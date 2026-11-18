@@ -29,6 +29,7 @@ from netbox_sync.ui.pages.connections import ConnectionsPage
 from netbox_sync.ui.pages.ipam import IpamPage
 from netbox_sync.ui.pages.log import LogPage
 from netbox_sync.ui.pages.overview import OverviewPage
+from netbox_sync.ui.pages.printers import PrintersPage
 from netbox_sync.ui.pages.scanner import ScannerPage
 from netbox_sync.ui.pages.settings import SettingsPage
 from netbox_sync.ui.pages.switches import SwitchesPage
@@ -47,6 +48,7 @@ NAVIGATION = (
     ("switches", "Switche", "network"),
     ("clients", "Windows-Clients", "monitor"),
     ("aps", "Access Points", "wifi"),
+    ("printers", "Drucker", "printer"),
     ("ipam", "VRFs && Netze", "globe"),
     ("scanner", "Netzwerk-Scanner", "search"),
     ("log", "Protokoll", "list"),
@@ -109,6 +111,7 @@ class MainWindow(QMainWindow):
 
         for key, page_class in (("overview", OverviewPage), ("connections", ConnectionsPage), ("vms", VMsPage),
                                 ("switches", SwitchesPage), ("clients", ClientsPage), ("aps", AccessPointsPage),
+                                ("printers", PrintersPage),
                                 ("ipam", IpamPage), ("scanner", ScannerPage),
                                 ("log", LogPage),
                                 ("settings", SettingsPage)):
@@ -371,7 +374,7 @@ class MainWindow(QMainWindow):
         has_profile = self.state.profile is not None
         for key in ("duplicate", "rename", "delete"):
             self.profile_actions[key].setEnabled(has_profile)
-        for key in ("connections", "vms", "switches", "clients", "aps", "ipam"):
+        for key in ("connections", "vms", "switches", "clients", "aps", "printers", "ipam"):
             self.nav_buttons[key].setEnabled(has_profile)
         self.setWindowTitle(f"{self.state.active} – {APP_NAME}" if has_profile else APP_NAME)
         self._refresh_netbox_pill()
