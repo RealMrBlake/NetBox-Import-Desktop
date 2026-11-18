@@ -1,13 +1,81 @@
 """Dialogs for transferring scanned Windows clients to NetBox."""
 
-from PySide6.QtWidgets import QFormLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem
+import csv
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtWidgets import QFileDialog, QFormLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem
 
 from netbox_sync.ui.dialogs import _Dialog, _mark_invalid
 from netbox_sync.ui.icons import icon
 from netbox_sync.ui.theme import theme
-from netbox_sync.ui.widgets import Badge, Banner, SearchableComboBox, checkbox, form_dialog_buttons, label
+from netbox_sync.ui.models import Column, FilterProxy, RowTableModel
+from netbox_sync.ui.widgets import (
+    Badge,
+    Banner,
+    SearchableComboBox,
+    SearchField,
+    Table,
+    button,
+    checkbox,
+    error,
+    form_dialog_buttons,
+    label,
+)
 
 ROLE_HINTS = ("client", "arbeitsplatz", "workstation", "pc", "notebook")
+
+
+class ClientSoftwareDialog(_Dialog):
+    """Installed software of one client (from the NetBox Windows Agent), searchable and exportable."""
+
+    def __init__(self, parent, row):
+        software = row.get("software") or []
+        super().__init__(parent, f"Software – {row['name']}",
+                         f"{len(software)} Programme laut NetBox-Agent (maschinenweit installierte Software)"
+                         + (f" · erfasst {row['scanned_text']}" if row.get("scanned_text") else ""), width=760)
+        self.resize(900, 640)
+        self.row = row
+        self.search = SearchField("Programm, Version, Hersteller …")
+        self.root.addWidget(self.search)
+        columns = [Column("name", "Programm", 420), Column("version", "Version", 150),
+                   Column("publisher", "Hersteller", 260)]
+        self.model = RowTableModel(columns, row_id=lambda item: (item["name"], item["version"]))
+        self.model.set_rows(software)
+        self.proxy = FilterProxy(self.model)
+        self.search.textChanged.connect(self.proxy.set_text)
+        table = Table()
+        table.setModel(self.proxy)
+        table.sortByColumn(0, Qt.AscendingOrder)
+        for index, column in enumerate(columns):
+            table.setColumnWidth(index, column.width)
+        self.root.addWidget(table, 1)
+        buttons = QHBoxLayout()
+        buttons.addWidget(button("Als CSV speichern …", "download", on_click=self.save_csv))
+        buttons.addWidget(button("Kopieren", "copy", on_click=self.copy))
+        buttons.addStretch(1)
+        buttons.addWidget(button("Schließen", variant="primary", on_click=self.accept))
+        self.root.addLayout(buttons)
+
+    def _lines(self):
+        return [(item["name"], item["version"], item["publisher"]) for item in self.row.get("software") or []]
+
+    def copy(self):
+        QGuiApplication.clipboard().setText("\n".join("\t".join(line) for line in self._lines()))
+
+    def save_csv(self):
+        path, _filter = QFileDialog.getSaveFileName(self, "Software speichern", f"{self.row['name']}-software.csv",
+                                                    "CSV (*.csv)")
+        if not path:
+            return
+        try:
+            # utf-8-sig and semicolons so that Excel opens it directly
+            with open(path, "w", encoding="utf-8-sig", newline="") as stream:
+                writer = csv.writer(stream, delimiter=";")
+                writer.writerow(("Programm", "Version", "Hersteller"))
+                writer.writerows(self._lines())
+        except OSError as problem:
+            error(self, "Speichern fehlgeschlagen", str(problem))
 
 
 class ClientTargetDialog(_Dialog):
@@ -95,6 +163,9 @@ class ClientPreviewDialog(_Dialog):
             (f"{report['interfaces_created']} Schnittstellen", "info"),
             (f"{report['ips_created']} IP-Adressen", "info"),
         ]
+        assets = report.get("assets_created", 0) + report.get("assets_updated", 0)
+        if assets:
+            items.append((f"{assets} Assets", "info"))
         if report["errors"]:
             items.append((f"{len(report['errors'])} Probleme", "error"))
         for text, kind in items:

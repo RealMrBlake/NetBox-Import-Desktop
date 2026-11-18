@@ -810,7 +810,9 @@ class Actions:
             self.state.client_engine = engine
             self.state.clients_changed.emit()
             text = (f"{report['devices_created']} Geräte angelegt, {report['devices_updated']} aktualisiert, "
-                    f"{report['interfaces_created']} Schnittstellen, {report['ips_created']} IP-Adressen")
+                    f"{report['interfaces_created']} Schnittstellen, {report['ips_created']} IP-Adressen"
+                    + (f", {report['assets_created']} Assets angelegt, {report['assets_updated']} aktualisiert"
+                       if report.get("assets_created") or report.get("assets_updated") else ""))
             area_log("client")(f"Client-Übertragung: {text}", "success")
             if report["errors"]:
                 widgets.message(self.window, "Mit Problemen abgeschlossen", text + ".", "warning",

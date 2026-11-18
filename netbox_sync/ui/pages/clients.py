@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLineEdit,
+    QMenu,
     QPlainTextEdit,
     QRadioButton,
     QSpinBox,
@@ -23,7 +24,10 @@ from netbox_sync.core import agent_client
 from netbox_sync.core.client_sync import clean_manufacturer
 from netbox_sync.core.clients import WINRM_HTTP_PORT, WINRM_HTTPS_PORT, os_label, os_version_label
 from netbox_sync.ui import widgets
+from netbox_sync.ui.client_dialogs import ClientSoftwareDialog
 from netbox_sync.ui.client_help import ClientHelpDialog
+from netbox_sync.ui.icons import icon
+from netbox_sync.ui.theme import theme
 from netbox_sync.ui.credentials import ask_credentials
 from netbox_sync.ui.models import Column, FilterProxy, RowTableModel
 from netbox_sync.ui.pages import Page
@@ -235,6 +239,10 @@ class ClientsPage(Page):
             Column("chassis", "Bauform", 95),
             Column("user", "Angemeldet", 140),
             Column("ips", "IP-Adressen", 160, value=_ips),
+            Column("software", "Software", 90,
+                   value=lambda row: f"{len(row['software'])} Programme" if row.get("software") else "",
+                   sort=lambda row: len(row.get("software") or []), color=lambda row: "accent",
+                   tooltip=lambda row: "Doppelklick: vollständige Liste" if row.get("software") else ""),
             Column("last_logon", "AD-Anmeldung", 105, value=lambda row: _date((row.get("ad") or {}).get("last_logon")),
                    sort=lambda row: (row.get("ad") or {}).get("last_logon") or 0),
         ]
@@ -246,6 +254,8 @@ class ClientsPage(Page):
         for index, column in enumerate(columns):
             self.table.setColumnWidth(index, column.width)
         self.table.doubleClicked.connect(self._toggle)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._context_menu)
         card.add(self.table, 1)
 
         footer = QHBoxLayout()
@@ -506,7 +516,27 @@ class ClientsPage(Page):
 
     def _toggle(self, index):
         row = self.proxy.row_at(index)
+        if self.model.columns[index.column()].key == "software" and row.get("software"):
+            self.show_software(row)
+            return
         self.model.set_checked({row["id"]}, row["id"] not in self.model.checked)
+
+    def show_software(self, row):
+        ClientSoftwareDialog(self.window, dict(row, scanned_text=time.strftime(
+            "%d.%m.%Y %H:%M", time.localtime(row["scanned_at"])) if row.get("scanned_at") else "")).exec()
+
+    def _context_menu(self, position):
+        index = self.table.indexAt(position)
+        if not index.isValid():
+            return
+        row = self.proxy.row_at(index)
+        menu = QMenu(self)
+        action = menu.addAction(icon("list", theme.color("text_muted")), "Software anzeigen …",
+                                lambda: self.show_software(row))
+        action.setEnabled(bool(row.get("software")))
+        if not row.get("software"):
+            action.setText("Software anzeigen … (nur mit NetBox-Agent)")
+        menu.exec(self.table.viewport().mapToGlobal(position))
 
     def select_visible(self):
         self.model.set_checked({row["id"] for row in self.proxy.visible_rows()})

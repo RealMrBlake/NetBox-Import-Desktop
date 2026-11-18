@@ -78,6 +78,9 @@ def _report_body(comments):
     return None
 
 
+_UNKNOWN = object()
+
+
 def _noop(*_args, **_kwargs):
     pass
 
@@ -132,6 +135,7 @@ class ClientSyncEngine:
         self._device_types = {}
         self._platforms = {}
         self._planned = set()
+        self._asset_endpoint = _UNKNOWN
 
     # ------------------------------------------------------------------
     # Lookups
@@ -222,7 +226,71 @@ class ClientSyncEngine:
     @staticmethod
     def new_report():
         return {"devices_created": 0, "devices_updated": 0, "devices_unchanged": 0, "objects_created": 0,
-                "interfaces_created": 0, "ips_created": 0, "changes": [], "errors": [], "items": []}
+                "interfaces_created": 0, "ips_created": 0, "assets_created": 0, "assets_updated": 0,
+                "changes": [], "errors": [], "items": []}
+
+    # ------------------------------------------------------------------
+    # netbox-inventory plugin (asset management)
+    # ------------------------------------------------------------------
+
+    def asset_endpoint(self):
+        """``plugins/inventory/assets`` when the netbox-inventory plugin is installed, else ``None``."""
+        if self._asset_endpoint is _UNKNOWN:
+            try:
+                endpoint = self.nb.plugins.inventory.assets
+                list(endpoint.filter(serial="netbox-sync-probe"))
+                self._asset_endpoint = endpoint
+            except Exception as error:  # noqa: BLE001 - plugin missing (404), no permission or no plugins API
+                self._asset_endpoint = None
+                if hasattr(self.nb, "plugins"):
+                    self.log(f"netbox-inventory nicht verfügbar – Assets werden übersprungen ({error})", "info")
+        return self._asset_endpoint
+
+    def _sync_asset(self, client, device, type_id, dry_run, report):
+        """Create or update the inventory asset of a client (found by serial number)."""
+        endpoint = self.asset_endpoint()
+        serial = clean_serial(client.get("serial"))
+        if endpoint is None or not serial:
+            return []
+        assets = list(endpoint.filter(serial=serial))
+        if len(assets) > 1:
+            return [f"Asset übersprungen – {len(assets)} Assets mit der Seriennummer {serial}"]
+        report_text = inventory_report(client)
+        description = f"Windows-Client; UUID {client['uuid']}" if client.get("uuid") else "Windows-Client"
+        if not assets:
+            report["assets_created"] += 1
+            if not dry_run:
+                payload = {"name": client["name"], "serial": serial, "status": "used", "device_type": type_id,
+                           "description": description}
+                if device is not None:
+                    payload["device"] = device.id
+                if report_text:
+                    payload["comments"] = merge_report("", report_text)
+                endpoint.create(payload)
+            return ["Asset im Inventory-Plugin anlegen"]
+        asset = assets[0]
+        updates = {}
+        if (getattr(asset, "name", "") or "") != client["name"]:
+            updates["name"] = client["name"]
+        if str(getattr(getattr(asset, "status", None), "value", getattr(asset, "status", "")) or "") != "used":
+            updates["status"] = "used"
+        if type_id is not None and related_id(asset, "device_type") != type_id:
+            updates["device_type"] = type_id
+        if device is not None and related_id(asset, "device") != device.id:
+            updates["device"] = device.id
+        if client.get("uuid") and (getattr(asset, "description", "") or "") != description:
+            updates["description"] = description
+        current = getattr(asset, "comments", "") or ""
+        if report_text and _without_timestamp(_report_body(current)) != _without_timestamp(report_text):
+            updates["comments"] = merge_report(current, report_text)
+        if not updates:
+            return []
+        report["assets_updated"] += 1
+        if not dry_run:
+            asset.update(updates)
+        labels = {"name": "Name", "status": "Status", "device_type": "Gerätetyp", "device": "Gerät",
+                  "description": "UUID", "comments": "Inventarbericht"}
+        return ["Asset aktualisieren: " + ", ".join(labels[key] for key in updates)]
 
     def sync(self, clients, site_id, role_id, tenant_id=None, interfaces=True, update_existing=True, dry_run=True,
              progress=_noop, cancelled=lambda: False):
@@ -261,6 +329,7 @@ class ClientSyncEngine:
                 changes.append(f"Inventarbericht in den Kommentaren ({len(client.get('software') or [])} Programme)")
             report["devices_created"] += 1
             if dry_run:
+                changes.extend(self._sync_asset(client, None, type_id, dry_run, report))
                 if interfaces:
                     for interface in client.get("interfaces", []):
                         changes.append(f"Schnittstelle {interface['name']} anlegen"
@@ -308,6 +377,11 @@ class ClientSyncEngine:
                     device.update(updates)
         if interfaces:
             changes.extend(self._sync_interfaces(device, client, tenant_id, dry_run, report))
+        try:
+            changes.extend(self._sync_asset(client, device, type_id, dry_run, report))
+        except Exception as error:  # noqa: BLE001 - the device itself is fine; report the asset problem
+            report["errors"].append(f"{name}: Asset – {error}")
+            changes.append(f"Asset fehlgeschlagen: {error}")
         if not changes:
             report["devices_unchanged"] += 1
         return changes

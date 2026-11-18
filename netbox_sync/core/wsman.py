@@ -217,6 +217,7 @@ def query_client(host, credential=None, use_ssl=False, port=None, timeout=30):
         "model": system.get("Model") or "",
         "product_name": product.get("Name") or "",
         "product_version": product.get("Version") or "",
+        "uuid": product.get("UUID") or "",
         "serial": bios.get("SerialNumber") or "",
         "bios_version": bios.get("SMBIOSBIOSVersion") or "",
         "chassis": [as_int(value) for value in as_list(enclosure.get("ChassisTypes"))],

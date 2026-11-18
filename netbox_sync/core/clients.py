@@ -274,6 +274,7 @@ def apply_scan(row, raw, now=None):
         "installed": raw.get("installed", ""),
         "last_boot": raw.get("last_boot", ""),
         "source": raw.get("source", "winrm"),
+        "uuid": raw.get("uuid", ""),
         "agent_version": raw.get("agent_version", ""),
         "software_count": len(raw.get("software") or []),
         "software": [{"name": item.get("name", ""), "version": item.get("version", ""),

@@ -260,3 +260,59 @@ def test_winrm_scan_leaves_comments_alone():
     engine.load_targets()
     engine.sync([client], 1, 2, dry_run=False)
     assert "comments" not in nb.dcim.devices.created[0]
+
+
+def _with_inventory_plugin(nb):
+    from types import SimpleNamespace
+
+    from fake_netbox import Endpoint
+    nb.plugins = SimpleNamespace(inventory=SimpleNamespace(assets=Endpoint()))
+    return nb.plugins.inventory.assets
+
+
+def test_new_client_gets_an_asset_linked_to_the_device():
+    nb, client = _setup()
+    assets = _with_inventory_plugin(nb)
+    agent_row = apply_scan(new_row("pc01.firma.local"), dict(RAW, source="agent", uuid="4C4C-1234",
+                                                             software=[{"name": "7-Zip", "version": "24", "publisher": ""}]))
+    engine = ClientSyncEngine(nb)
+    engine.load_targets()
+    preview = engine.sync([agent_row], 1, 2, dry_run=True)
+    assert preview["assets_created"] == 1 and "Asset im Inventory-Plugin anlegen" in preview["items"][0][1]
+    assert assets.created == []
+
+    engine.sync([agent_row], 1, 2, dry_run=False)
+    device = nb.dcim.devices.records[0]
+    asset = assets.created[0]
+    assert asset["serial"] == "PW0K84A9" and asset["device"] == device.id and asset["status"] == "used"
+    assert asset["device_type"] == device.device_type and asset["description"] == "Windows-Client; UUID 4C4C-1234"
+    assert "| 7-Zip | 24 |  |" in asset["comments"]
+
+    again = ClientSyncEngine(nb)
+    again.load_targets()
+    report = again.sync([agent_row], 1, 2, dry_run=True)
+    assert report["assets_created"] == 0 and report["assets_updated"] == 0 and report["items"][0][1] == []
+
+
+def test_existing_asset_is_linked_and_updated_by_serial():
+    nb, client = _setup()
+    assets = _with_inventory_plugin(nb)
+    assets.records.append(Record(assets, id=500, name="Lager-Notebook", serial="PW0K84A9", status="stored",
+                                 device=None, device_type=None, description="", comments="Kaufbeleg 4711"))
+    engine = ClientSyncEngine(nb)
+    engine.load_targets()
+    report = engine.sync([client], 1, 2, dry_run=False)
+    asset = assets.records[0]
+    device = nb.dcim.devices.records[0]
+    assert report["assets_updated"] == 1 and report["assets_created"] == 0
+    assert asset.device == device.id and asset.status == "used" and asset.name == "PC01"
+    assert asset.comments == "Kaufbeleg 4711"  # WinRM scan: no inventory report, comments untouched
+    assert any(change.startswith("Asset aktualisieren: Name, Status, Gerätetyp, Gerät") for change in report["items"][0][1])
+
+
+def test_without_inventory_plugin_no_asset_is_touched():
+    nb, client = _setup()
+    engine = ClientSyncEngine(nb)
+    engine.load_targets()
+    report = engine.sync([client], 1, 2, dry_run=False)
+    assert report["errors"] == [] and report["assets_created"] == 0 and engine.asset_endpoint() is None
