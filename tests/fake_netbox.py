@@ -31,6 +31,10 @@ def _matches(record, key, value):
         vrf = getattr(record, "vrf", None)
         vrf_id = vrf if isinstance(vrf, int) else getattr(vrf, "id", None)
         return (vrf_id is None) if value == "null" else vrf_id == value
+    if key == "contains":
+        import ipaddress
+        prefix = getattr(record, "prefix", None)
+        return prefix is not None and ipaddress.ip_address(value) in ipaddress.ip_network(str(prefix), strict=False)
     if key == "address":
         return str(getattr(record, "address", "")).split("/")[0] == str(value).split("/")[0]
     if key.endswith("_id") and not hasattr(record, key):

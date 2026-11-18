@@ -1,3 +1,4 @@
+import ipaddress
 from types import SimpleNamespace
 
 import pytest
@@ -128,3 +129,24 @@ def test_without_tenant_the_whole_netbox_is_searched_and_tenant_comes_from_the_c
     assert [ap["device"].id if ap["device"] else None for ap in aps] == [102, 101, None]
     report = engine.sync(aps, {ap_key(aps[2]): {"site": 21, "tenant": 7}}, role_id=30, dry_run=False)
     assert report["errors"] == [] and nb.dcim.devices.created[-1]["tenant"] == 7
+
+
+def test_ip_goes_into_the_vrf_of_the_tenant_prefix():
+    nb = _netbox()
+    vrf = nb.ipam.vrfs.create({"name": "Kunde", "tenant": 7})
+    nb.ipam.vrfs.create({"name": "Fremd", "tenant": 999})
+    nb.ipam.prefixes.create({"prefix": "10.0.0.0/8", "vrf": None})
+    nb.ipam.prefixes.create({"prefix": "0.0.0.0/0", "vrf": None})
+    for ap in parse_csv(CSV):
+        if ap["ip"]:
+            network = ipaddress.ip_network(f"{ap['ip']}/24", strict=False)
+            if not nb.ipam.prefixes.filter(prefix=str(network)):
+                nb.ipam.prefixes.create({"prefix": str(network), "vrf": SimpleNamespace(id=vrf.id, name="Kunde")})
+    engine = APSyncEngine(nb)
+    engine.load_context(7)
+    aps = parse_csv(CSV)
+    engine.match(aps)
+    report = engine.sync(aps, {ap_key(aps[2]): {"site": 21}}, role_id=30, dry_run=False)
+    assert report["errors"] == []
+    created = nb.ipam.ip_addresses.created
+    assert created and all(payload["vrf"] == vrf.id and payload["address"].endswith("/24") for payload in created)

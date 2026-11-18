@@ -13,6 +13,7 @@ import ipaddress
 import re
 
 from netbox_sync.core.client_sync import ClientSyncEngine
+from netbox_sync.core.switches import candidate_vrfs
 from netbox_sync.core.netbox import assign_mac, normalize_mac, related_id, uses_mac_objects
 
 MANUFACTURER = "Sophos"
@@ -260,6 +261,7 @@ class APSyncEngine(ClientSyncEngine):
         """
         report = self.new_report()
         self._planned = set()
+        self._vrf_cache = {}
         for ap in aps:
             try:
                 changes = self._sync_ap(ap, placements.get(ap_key(ap)) or {}, role_id, rename, dry_run, report,
@@ -327,7 +329,9 @@ class APSyncEngine(ClientSyncEngine):
                                                                                else ""))
                 if ap["ip"]:
                     report["ips_created"] += 1
-                    changes.append(f"IP-Adresse {ap['ip']} anlegen")
+                    prefix = self._prefix_for(ap["ip"], tenant_id)
+                    vrf = getattr(prefix, "vrf", None) if prefix else None
+                    changes.append(f"IP-Adresse {ap['ip']} anlegen" + (f" (VRF {vrf.name})" if vrf else ""))
                 return changes
             device = self.nb.dcim.devices.create(payload)
         if dry_run and device is None:
@@ -350,6 +354,21 @@ class APSyncEngine(ClientSyncEngine):
         interface = self.nb.dcim.interfaces.create({"device": device.id, "name": INTERFACE_NAME, "type": "1000base-t"})
         return interface, [f"Schnittstelle {INTERFACE_NAME} anlegen"]
 
+    def _prefix_for(self, ip, tenant_id):
+        """Most specific prefix containing ``ip``, globally or in a VRF of the tenant (group).
+
+        With the same length a VRF prefix wins over a global one.
+        """
+        if tenant_id not in self._vrf_cache:
+            # VRFs of the device's tenant and of the tenant chosen for the import (and their groups).
+            owners = {owner for owner in (tenant_id, self.tenant_id) if owner}
+            self._vrf_cache[tenant_id] = {vrf.id for owner in owners for vrf in candidate_vrfs(self.nb, owner)}
+        allowed = self._vrf_cache[tenant_id]
+        prefixes = [prefix for prefix in self.nb.ipam.prefixes.filter(contains=ip)
+                    if related_id(prefix, "vrf") is None or related_id(prefix, "vrf") in allowed]
+        return max(prefixes, default=None, key=lambda prefix: (
+            ipaddress.ip_network(str(prefix.prefix), strict=False).prefixlen, related_id(prefix, "vrf") is not None))
+
     def _sync_network(self, device, ap, tenant_id, dry_run, report):
         if not ap["mac"] and not ap["ip"]:
             return []
@@ -359,10 +378,12 @@ class APSyncEngine(ClientSyncEngine):
                 changes.append(f"MAC {ap['mac']} zugeordnet")
         if not ap["ip"]:
             return changes
-        prefix = next(iter(self.nb.ipam.prefixes.filter(contains=ap["ip"], vrf_id="null")), None)
+        prefix = self._prefix_for(ap["ip"], tenant_id)
         length = str(getattr(prefix, "prefix", "")).split("/")[-1] if prefix else "32"
+        vrf_id = related_id(prefix, "vrf") if prefix else None
         address = f"{ap['ip']}/{length}"
-        existing = list(self.nb.ipam.ip_addresses.filter(address=ap["ip"], vrf_id="null"))
+        where = f" (VRF {getattr(getattr(prefix, 'vrf', None), 'name', vrf_id)})" if vrf_id else ""
+        existing = list(self.nb.ipam.ip_addresses.filter(address=ap["ip"], vrf_id=vrf_id or "null"))
         if existing:
             ip = existing[0]
             assigned = getattr(ip, "assigned_object_id", None)
@@ -378,11 +399,11 @@ class APSyncEngine(ClientSyncEngine):
                                "tenant": related_id(ip, "tenant") or tenant_id})
         else:
             report["ips_created"] += 1
-            changes.append(f"IP-Adresse {address} anlegen")
+            changes.append(f"IP-Adresse {address} anlegen{where}")
             if dry_run or interface is None:
                 return changes
             ip = self.nb.ipam.ip_addresses.create({
-                "address": address, "status": "active", "tenant": tenant_id,
+                "address": address, "status": "active", "tenant": tenant_id, "vrf": vrf_id,
                 "assigned_object_type": "dcim.interface", "assigned_object_id": interface.id,
             })
         if not dry_run and related_id(device, "primary_ip4") != ip.id:
