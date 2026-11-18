@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QFileDialog
 
-from netbox_sync.core import backups, exchange, lancom, netbox
+from netbox_sync.core import agent_client, backups, exchange, lancom, netbox
 from netbox_sync.core.client_sync import ClientSyncEngine
 from netbox_sync.core.clients import ClientScanError, expand_targets, new_row, query_ad, scan_clients
 from netbox_sync.core.config import known_hosts_path
@@ -645,9 +645,19 @@ class Actions:
         parallel = max(1, int(self.state.settings.get("parallel_wmi", 8)))
         mode = options.get("mode", "ad")
         hosts = []
-        if rows is None and mode == "hosts":
+        agent = mode == "agent"
+        agent_key = (self.state.profile or {}).get("agent_key", "")
+        agent_port = int(options.get("agent_port") or agent_client.DEFAULT_PORT)
+        if agent and not agent_key:
+            widgets.message(self.window, "Agent-Schlüssel fehlt",
+                            "Bitte zuerst einen Agent-Schlüssel erzeugen und mit der Agent-Konfiguration verteilen.",
+                            "info")
+            return
+        if agent:
+            parallel = max(parallel, 32)
+        if rows is None and mode in ("hosts", "agent"):
             try:
-                hosts = expand_targets(options.get("hosts", ""))
+                hosts = expand_targets(options.get("agent_targets" if agent else "hosts", ""))
             except ClientScanError as error:
                 widgets.error(self.window, "Ungültige Eingabe", str(error))
                 return
@@ -684,11 +694,17 @@ class Actions:
                     ctx.progress(done[0], len(targets), row["name"])
 
             ctx.progress(0, len(targets), "")
+            extra = ({"query": lambda host: agent_client.query(host, agent_key, agent_port), "port": agent_port,
+                      "service": "Agent"} if agent else {})
             results = scan_clients(targets, credential, bool(options.get("use_ssl")), parallel, log=ctx.log,
-                                   on_result=on_result, cancelled=lambda: ctx.cancelled)
+                                   on_result=on_result, cancelled=lambda: ctx.cancelled, **extra)
             ctx.check_cancelled()
             by_host = {row["host"]: row for row in results}
-            return nb, engine, [by_host.get(row["host"], row) for row in targets]
+            scanned = [by_host.get(row["host"], row) for row in targets]
+            if agent and targets_given is None:
+                # A range scan: only hosts where an agent answered (or rejected us) are of interest.
+                scanned = [row for row in scanned if row["status"] != "offline"]
+            return nb, engine, scanned
 
         def success(result):
             nb, engine, scanned = result

@@ -119,6 +119,77 @@ winrm/config/listener</span>.</td></tr>
 """
 
 
+AGENT_REPO = "https://git.mrblake.cc/MrBlake/Netbox-Client-Agent-for-Windows"
+
+
+def _agent_html():
+    accent = theme.color("accent")
+    code_bg = theme.color("log_bg")
+    return f"""
+<style>
+h2 {{ font-size: 13pt; margin: 14px 0 6px 0; }}
+h3 {{ font-size: 10.5pt; margin: 12px 0 4px 0; color: {accent}; }}
+p, li {{ line-height: 140%; }}
+.path {{ font-family: 'Cascadia Mono', Consolas, monospace; background: {code_bg}; }}
+td {{ padding: 3px 10px 3px 0; vertical-align: top; }}
+</style>
+
+<h2>NetBox-Agent statt WinRM</h2>
+<p>Der <b>NetBox Windows Agent</b> läuft unsichtbar als SYSTEM-Aufgabe auf den Clients und stellt sein
+Inventar auf einem TCP-Port (Standard 8731) bereit. Dieser Rechner scannt IP-Bereiche und liest die Agenten
+aus – <b>ohne WinRM, ohne Administratorkonto und ohne NetBox-Zugang auf den Clients</b>. Die Abfrage ist mit
+dem Agent-Schlüssel signiert, die Antwort mit AES-256 verschlüsselt. Benutzer bemerken nichts: kein Fenster,
+keine Firewall-Abfrage.</p>
+
+<h3>1. Schlüssel und Konfiguration</h3>
+<ol>
+<li>Modus <b>NetBox-Agent (Netzwerk-Scan)</b> wählen und <b>Schlüssel erzeugen</b> (einer pro Kunde,
+verschlüsselt im Profil gespeichert).</li>
+<li>Optional unter <b>Freigegebene Netze</b> das Admin-Netz eintragen – dann nehmen die Agenten nur von dort
+Verbindungen an.</li>
+<li><b>Agent-Konfiguration speichern …</b> erzeugt die fertige <span class="path">config.json</span>.</li>
+</ol>
+
+<h3>2. Dateien zusammenstellen</h3>
+<p><span class="path">agent.exe</span>, <span class="path">install.ps1</span>,
+<span class="path">uninstall.ps1</span> und <span class="path">gpo-startup.ps1</span> kommen aus dem
+Agent-Projekt ({AGENT_REPO}, Ordner <span class="path">dist</span> bzw. <span class="path">scripts</span>),
+dazu die eben gespeicherte <span class="path">config.json</span>.</p>
+
+<h3>3a. Verteilung per Intune</h3>
+<table>
+<tr><td>Paket</td><td>agent.exe, config.json, install.ps1, uninstall.ps1 als Win32-App (.intunewin)</td></tr>
+<tr><td>Installation</td><td><span class="path">powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\install.ps1
+-SourceDirectory .</span></td></tr>
+<tr><td>Deinstallation</td><td><span class="path">powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+.\\uninstall.ps1</span></td></tr>
+<tr><td>Verhalten</td><td>System · als <b>Erforderlich</b> einer Gerätegruppe zuweisen</td></tr>
+<tr><td>Erkennung</td><td>Datei <span class="path">C:\\Program Files\\NetBox Windows Agent</span> /
+<span class="path">agent.exe</span>, Methode „Zeichenfolge (Version)“, „Größer als oder gleich“, z. B. 0.2.0</td></tr>
+</table>
+
+<h3>3b. Verteilung per Gruppenrichtlinie</h3>
+<ol>
+<li>Alle fünf Dateien in eine Freigabe legen, die „Domänencomputer“ lesen dürfen, z. B.
+<span class="path">\\\\fileserver\\NetBoxAgent$</span>.</li>
+<li>GPO für die OU der Clients: <b>Computerkonfiguration › Richtlinien › Windows-Einstellungen › Skripts ›
+Starten › PowerShell-Skripts</b> – <span class="path">\\\\fileserver\\NetBoxAgent$\\gpo-startup.ps1</span>
+ohne Parameter.</li>
+<li><b>Computerkonfiguration › Administrative Vorlagen › System › Anmelden › Beim Neustart des Computers und
+bei der Anmeldung immer auf das Netzwerk warten</b> = Aktiviert.</li>
+</ol>
+<p>Das Skript installiert beim Start nur, wenn sich agent.exe oder config.json auf der Freigabe geändert
+haben – neue Versionen oder ein neuer Schlüssel werden so automatisch verteilt.</p>
+
+<h3>4. Scannen</h3>
+<p>IP-Bereiche als Ziele eintragen und <b>Abfragen</b>. Es erscheinen nur Rechner, auf denen ein Agent
+antwortet; die Übertragung nach NetBox läuft wie beim WinRM-Scan mit Vorschau.</p>
+<p>Findet der Scan keinen Agenten: Läuft die Aufgabe „NetBox Windows Agent Listener“? Ist Port 8731
+zwischen den Netzen offen (<span class="path">Test-NetConnection PC0815 -Port 8731</span>)? Liegt dieser
+Rechner in den freigegebenen Netzen? Die Firewall-Regel gilt für die Profile Domäne und Privat.</p>
+"""
+
+
 class ClientHelpDialog(_Dialog):
     def __init__(self, parent, state, tab=0):
         super().__init__(parent, "Einrichtungshilfe: Windows-Clients",
@@ -168,6 +239,11 @@ class ClientHelpDialog(_Dialog):
         layout.addWidget(self.result_banner)
         layout.addStretch(1)
         self.tabs.addTab(test, "Verbindung testen")
+
+        agent = QTextBrowser()
+        agent.setOpenExternalLinks(True)
+        agent.setHtml(_agent_html())
+        self.tabs.addTab(agent, "NetBox-Agent")
 
         self.root.addWidget(self.tabs, 1)
         self.root.addWidget(button("Schließen", variant="primary", on_click=self.accept), 0, Qt.AlignRight)

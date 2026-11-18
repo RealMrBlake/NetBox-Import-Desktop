@@ -115,6 +115,8 @@ def empty_profile(name):
         "netbox_url": "",
         "netbox_token": "",
         "netbox_ignore_ssl": False,
+        # Shared key of the NetBox Windows Agents of this customer (listen mode).
+        "agent_key": "",
         "sources": [],
         "switches": [],
         # Remembered assignment "<source id>:<hypervisor cluster>" -> NetBox cluster name.
@@ -176,6 +178,8 @@ class ProfileStore:
             profile.update({
                 "netbox_url": record.get("netbox_url", ""),
                 "netbox_token": self._decrypt(record.get("netbox_token_encrypted", ""), f"{name}: NetBox-Token"),
+                "agent_key": self._decrypt(record.get("agent_key_encrypted", ""), f"{name}: Agent-Schlüssel")
+                if record.get("agent_key_encrypted") else "",
                 "netbox_ignore_ssl": bool(record.get("netbox_ignore_ssl", record.get("ignore_ssl_errors", False))),
                 "cluster_map": dict(record.get("cluster_map", {})),
                 "host_map": dict(record.get("host_map", {})),
@@ -253,6 +257,7 @@ class ProfileStore:
                 "name": name,
                 "netbox_url": profile.get("netbox_url", ""),
                 "netbox_token_encrypted": protect(profile.get("netbox_token", "")),
+                "agent_key_encrypted": protect(profile.get("agent_key", "")) if profile.get("agent_key") else "",
                 "netbox_ignore_ssl": bool(profile.get("netbox_ignore_ssl", False)),
                 "sources": [self._encrypt_record(source) for source in profile.get("sources", [])],
                 "switches": [self._encrypt_record(switch) for switch in profile.get("switches", [])],

@@ -21,7 +21,7 @@ WINRM_HTTPS_PORT = 5986
 MAX_RANGE = 4096
 
 DEFAULT_CLIENT_OPTIONS = {
-    "mode": "ad",                 # ad | hosts
+    "mode": "ad",                 # ad | hosts | agent
     "ad_server": "",              # domain or domain controller, empty = own domain
     "ad_base": "",                # search base (OU DN), empty = whole domain
     "include_servers": False,
@@ -31,6 +31,10 @@ DEFAULT_CLIENT_OPTIONS = {
     "use_current_user": False,
     "username": "",               # remembered for the logon prompt, never the password
     "use_ssl": False,
+    # NetBox Windows Agent in listen mode (the key itself is a profile secret).
+    "agent_targets": "",
+    "agent_port": 8731,
+    "agent_networks": "",         # allowed_networks written into the agent configuration
     # Last choices in the NetBox transfer dialog.
     "netbox_site": None,
     "netbox_role": "Client",
@@ -269,6 +273,11 @@ def apply_scan(row, raw, now=None):
         "os_architecture": raw.get("os_architecture", ""),
         "installed": raw.get("installed", ""),
         "last_boot": raw.get("last_boot", ""),
+        "source": raw.get("source", "winrm"),
+        "agent_version": raw.get("agent_version", ""),
+        "software_count": len(raw.get("software") or []),
+        "disks": [{"model": disk.get("model", ""), "size": int(disk.get("size") or 0)}
+                  for disk in raw.get("disks") or []],
         # Only real adapters: VPN/TAP drivers report no MAC or are not physical.
         "interfaces": [_interface(nic) for nic in raw.get("nics") or [] if nic.get("physical") and nic.get("mac")],
     })
@@ -358,11 +367,14 @@ def friendly_error(text):
 # --------------------------------------------------------------------------
 
 def scan_clients(rows, credential=None, use_ssl=False, parallel=8, timeout=30, log=lambda *_args: None,
-                 on_result=lambda _row: None, cancelled=lambda: False, query=None):
-    """Query every row's host. ``on_result`` is called for each finished row (any thread)."""
+                 on_result=lambda _row: None, cancelled=lambda: False, query=None, port=None, service="WinRM"):
+    """Query every row's host. ``on_result`` is called for each finished row (any thread).
+
+    ``query``/``port``/``service`` replace the WinRM query, e.g. by the NetBox Windows Agent.
+    """
     if sys.platform != "win32" and query is None:
         raise ClientScanError("Die Abfrage von Windows-Clients ist nur unter Windows verfügbar.")
-    port = WINRM_HTTPS_PORT if use_ssl else WINRM_HTTP_PORT
+    port = port or (WINRM_HTTPS_PORT if use_ssl else WINRM_HTTP_PORT)
     results = []
 
     def scan(row):
@@ -374,7 +386,7 @@ def scan_clients(rows, credential=None, use_ssl=False, parallel=8, timeout=30, l
                         scanned_at=time.time())
         if not port_open(host, port):
             return dict(row, status="offline", scanned_at=time.time(),
-                        message=f"Nicht erreichbar – ausgeschaltet oder WinRM-Port {port} geschlossen.")
+                        message=f"Nicht erreichbar – ausgeschaltet oder {service}-Port {port} geschlossen.")
         if cancelled():
             return None
         if query is not None:
@@ -386,7 +398,7 @@ def scan_clients(rows, credential=None, use_ssl=False, parallel=8, timeout=30, l
                 raw = wsman.query_client(host, credential, use_ssl, port, timeout)
         return apply_scan(row, raw)
 
-    log(f"Frage {len(rows)} Client(s) über WinRM (Port {port}) ab …")
+    log(f"Frage {len(rows)} Client(s) über {service} (Port {port}) ab …")
     with ThreadPoolExecutor(max_workers=max(1, min(parallel, len(rows) or 1))) as pool:
         futures = [pool.submit(scan, row) for row in rows]
         for future in as_completed(futures):

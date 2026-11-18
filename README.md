@@ -219,6 +219,20 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
   permissions, common errors, check commands and a connection test for single
   clients
 
+### Windows clients with the NetBox Windows Agent
+
+- Third target mode **NetBox-Agent (Netzwerk-Scan)**: scans IP ranges for the
+  [NetBox Windows Agent](https://git.mrblake.cc/MrBlake/Netbox-Client-Agent-for-Windows)
+  in listen mode – no WinRM, no admin account and no NetBox access needed on the
+  clients; only hosts with an answering agent are listed
+- One shared key per profile (encrypted with DPAPI); requests are signed with
+  HMAC-SHA256, the inventory comes back encrypted with AES-256-GCM
+- "Agent-Konfiguration speichern …" writes the ready `config.json` (port,
+  key, optional allowed networks) for unattended deployment with Intune or a
+  Group Policy startup script; the setup guide has a tab with all steps
+- The agent data runs through the same table and NetBox transfer as the WinRM
+  scan, plus disks and the number of installed programs in the tooltip
+
 ### Offline mode (without NetBox)
 
 - "Offline mode (without NetBox)" checkbox in the sidebar — global, independent

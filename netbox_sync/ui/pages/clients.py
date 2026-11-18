@@ -1,9 +1,13 @@
+import ipaddress
+import json
 import os
 import time
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QFileDialog,
     QComboBox,
     QGridLayout,
     QHBoxLayout,
@@ -15,6 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from netbox_sync.core import agent_client
 from netbox_sync.core.client_sync import clean_manufacturer
 from netbox_sync.core.clients import WINRM_HTTP_PORT, WINRM_HTTPS_PORT, os_label, os_version_label
 from netbox_sync.ui import widgets
@@ -22,7 +27,18 @@ from netbox_sync.ui.client_help import ClientHelpDialog
 from netbox_sync.ui.credentials import ask_credentials
 from netbox_sync.ui.models import Column, FilterProxy, RowTableModel
 from netbox_sync.ui.pages import Page
-from netbox_sync.ui.widgets import Badge, Banner, Card, EmptyState, SearchField, Table, button, checkbox, label
+from netbox_sync.ui.widgets import (
+    Badge,
+    Banner,
+    Card,
+    EmptyState,
+    PasswordField,
+    SearchField,
+    Table,
+    button,
+    checkbox,
+    label,
+)
 
 STATUS = {
     "ok": ("OK", "success"),
@@ -55,6 +71,9 @@ def _tooltip(row):
         ("RAM", f"{row['memory'] / 1024 ** 3:.0f} GB" if row.get("memory") else ""),
         ("Angemeldet", row.get("user")),
         ("Letzter Start", (row.get("last_boot") or "").replace("T", " ")),
+        ("Quelle", f"NetBox-Agent {row.get('agent_version', '')}".strip() if row.get("source") == "agent" else ""),
+        ("Software", f"{row['software_count']} Programme (laut Agent)" if row.get("software_count") else ""),
+        ("Datenträger", ", ".join(f"{disk['model']} ({disk['size'] / 1e9:.0f} GB)" for disk in row.get("disks") or [])),
         ("AD", (row.get("ad") or {}).get("dn")),
     ):
         if value:
@@ -87,7 +106,8 @@ class ClientsPage(Page):
         mode_row.addWidget(label("Ziele", object_name="CardTitle"))
         self.mode_group = QButtonGroup(self)
         self.mode_buttons = {}
-        for key, text in (("ad", "Active Directory"), ("hosts", "Hostnamen / IP-Bereiche")):
+        for key, text in (("ad", "Active Directory"), ("hosts", "Hostnamen / IP-Bereiche"),
+                          ("agent", "NetBox-Agent (Netzwerk-Scan)")):
             radio = QRadioButton(text)
             radio.setCursor(Qt.PointingHandCursor)
             self.mode_group.addButton(radio)
@@ -136,12 +156,17 @@ class ClientsPage(Page):
                                       "PC0815.firma.local   10.0.10.0/24   10.0.20.10-50")
         self.hosts.setFixedHeight(76)
         self.mode_stack.addWidget(self.hosts)
+        self.mode_stack.addWidget(self._build_agent_panel())
         # QPlainTextEdit reports a tall size hint even with a fixed height.
-        self.mode_stack.setFixedHeight(max(ad_panel.sizeHint().height(), self.hosts.height()))
+        self.mode_stack.setFixedHeight(max(ad_panel.sizeHint().height(), self.hosts.height(),
+                                           self.agent_panel.sizeHint().height()))
         targets.add(self.mode_stack)
-        targets.add(widgets.hline())
+        self.separator = widgets.hline()
+        targets.add(self.separator)
 
-        logon = QHBoxLayout()
+        self.logon_widget = QWidget()
+        logon = QHBoxLayout(self.logon_widget)
+        logon.setContentsMargins(0, 0, 0, 0)
         logon.setSpacing(10)
         logon.addWidget(label("Anmeldung", object_name="CardTitle"))
         self.account_badge = Badge("", "neutral")
@@ -161,7 +186,7 @@ class ClientsPage(Page):
                                         "verschlüsselt. HTTPS erfordert einen Zertifikats-Listener auf den Clients.")
         logon.addWidget(self.current_user)
         logon.addWidget(self.use_ssl)
-        targets.add(logon)
+        targets.add(self.logon_widget)
         self.body.addWidget(targets)
 
         self.help_banner = Banner("Die Clients müssen einmalig für WinRM vorbereitet werden (Gruppenrichtlinie, "
@@ -250,6 +275,10 @@ class ClientsPage(Page):
         self.hosts.textChanged.connect(lambda: self._save(hosts=self.hosts.toPlainText()))
         self.current_user.toggled.connect(self._current_user_toggled)
         self.use_ssl.toggled.connect(lambda value: self._save(use_ssl=value))
+        self.agent_targets.textChanged.connect(lambda: self._save(agent_targets=self.agent_targets.toPlainText()))
+        self.agent_port.valueChanged.connect(lambda value: self._save(agent_port=value))
+        self.agent_networks.editingFinished.connect(
+            lambda: self._save(agent_networks=self.agent_networks.text().strip()))
         self.search.textChanged.connect(self.proxy.set_text)
         self.status_filter.currentIndexChanged.connect(self._apply_filters)
         self.netbox_filter.currentIndexChanged.connect(self._apply_filters)
@@ -272,7 +301,8 @@ class ClientsPage(Page):
     def load_options(self):
         options = self.state.client_options
         controls = (self.ad_server, self.ad_base, self.only_enabled, self.include_servers, self.max_age, self.hosts,
-                    self.current_user, self.use_ssl, *self.mode_buttons.values())
+                    self.current_user, self.use_ssl, self.agent_targets, self.agent_port, self.agent_networks,
+                    *self.mode_buttons.values())
         for widget in controls:
             widget.blockSignals(True)
         self.ad_server.setText(options.get("ad_server", ""))
@@ -284,16 +314,124 @@ class ClientsPage(Page):
             self.hosts.setPlainText(options.get("hosts", ""))
         self.current_user.setChecked(bool(options.get("use_current_user")))
         self.use_ssl.setChecked(bool(options.get("use_ssl")))
+        if self.agent_targets.toPlainText() != options.get("agent_targets", ""):
+            self.agent_targets.setPlainText(options.get("agent_targets", ""))
+        self.agent_port.setValue(int(options.get("agent_port") or agent_client.DEFAULT_PORT))
+        self.agent_networks.setText(options.get("agent_networks", ""))
         mode = options.get("mode", "ad")
         self.mode_buttons.get(mode, self.mode_buttons["ad"]).setChecked(True)
-        self.mode_stack.setCurrentIndex(0 if mode == "ad" else 1)
         for widget in controls:
             widget.blockSignals(False)
+        self._show_mode(mode)
         self._update_account()
+        self._update_agent_key()
 
     def _set_mode(self, mode):
-        self.mode_stack.setCurrentIndex(0 if mode == "ad" else 1)
+        self._show_mode(mode)
         self._save(mode=mode)
+
+    def _show_mode(self, mode):
+        self.mode_stack.setCurrentIndex({"ad": 0, "hosts": 1, "agent": 2}.get(mode, 0))
+        agent = mode == "agent"
+        # The agent needs no Windows logon – its shared key replaces it.
+        self.logon_widget.setVisible(not agent)
+        self.separator.setVisible(not agent)
+        self.help_banner.set(
+            "Der NetBox-Agent wird per Intune oder GPO verteilt und stellt sein Inventar verschlüsselt bereit – "
+            "ohne WinRM und ohne NetBox-Zugang auf den Clients. Die Einrichtungshilfe zeigt die Verteilung."
+            if agent else
+            "Die Clients müssen einmalig für WinRM vorbereitet werden (Gruppenrichtlinie, Firewall). Die "
+            "Einrichtungshilfe zeigt alle Schritte.")
+
+    # ------------------------------------------------------------------
+    # NetBox Windows Agent
+    # ------------------------------------------------------------------
+
+    def _build_agent_panel(self):
+        self.agent_panel = QWidget()
+        grid = QGridLayout(self.agent_panel)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
+        self.agent_targets = QPlainTextEdit()
+        self.agent_targets.setPlaceholderText("IP-Bereiche oder Hostnamen, z. B. 10.0.10.0/24, 10.0.20.10-50")
+        self.agent_targets.setFixedHeight(52)
+        grid.addWidget(label("Ziele"), 0, 0)
+        grid.addWidget(self.agent_targets, 0, 1, 1, 5)
+        self.agent_key = PasswordField("noch kein Schlüssel")
+        self.agent_key.setReadOnly(True)
+        grid.addWidget(label("Agent-Schlüssel"), 1, 0)
+        grid.addWidget(self.agent_key, 1, 1)
+        self.agent_key_new = button("Neu erzeugen", "refresh", on_click=self.new_agent_key,
+                                    tooltip="Neuen Schlüssel für die Agenten dieses Kunden erzeugen")
+        self.agent_key_copy = button("Kopieren", "copy", variant="ghost", on_click=self.copy_agent_key)
+        self.agent_config = button("Agent-Konfiguration speichern …", "download", on_click=self.save_agent_config,
+                                   tooltip="config.json für die Verteilung per Intune oder GPO erzeugen")
+        grid.addWidget(self.agent_key_new, 1, 2)
+        grid.addWidget(self.agent_key_copy, 1, 3)
+        grid.addWidget(self.agent_config, 1, 4, 1, 2)
+        self.agent_port = QSpinBox()
+        self.agent_port.setRange(1, 65535)
+        self.agent_port.setFixedWidth(100)
+        self.agent_networks = QLineEdit()
+        self.agent_networks.setPlaceholderText("leer = jede Adresse, z. B. 10.0.0.0/24 (Netz dieses Rechners)")
+        grid.addWidget(label("Port"), 2, 0)
+        grid.addWidget(self.agent_port, 2, 1, Qt.AlignLeft)
+        grid.addWidget(label("Freigegebene Netze"), 2, 2)
+        grid.addWidget(self.agent_networks, 2, 3, 1, 3)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+        return self.agent_panel
+
+    def _update_agent_key(self):
+        key = (self.state.profile or {}).get("agent_key", "")
+        self.agent_key.setText(key)
+        self.agent_key_copy.setEnabled(bool(key))
+        self.agent_config.setEnabled(bool(key))
+        self.agent_key_new.setText("Neu erzeugen" if key else "Schlüssel erzeugen")
+
+    def new_agent_key(self):
+        if self.state.profile is None:
+            return
+        if self.state.profile.get("agent_key") and not widgets.confirm(
+                self.window, "Neuen Schlüssel erzeugen?",
+                "Bereits verteilte Agenten lassen sich danach erst wieder abfragen, wenn sie die neue "
+                "Konfiguration erhalten haben.", "Neu erzeugen", destructive=True):
+            return
+        self.state.edit_profile(agent_key=agent_client.new_scan_key())
+        self._update_agent_key()
+        self.window.toast("Neuer Agent-Schlüssel erzeugt – Konfiguration neu verteilen.", "info")
+
+    def copy_agent_key(self):
+        QGuiApplication.clipboard().setText(self.agent_key.text())
+        self.window.toast("Agent-Schlüssel kopiert.", "info")
+
+    def save_agent_config(self):
+        key = (self.state.profile or {}).get("agent_key", "")
+        if not key:
+            return
+        networks = [part.strip() for part in self.agent_networks.text().replace(";", ",").split(",") if part.strip()]
+        for network in networks:
+            try:
+                ipaddress.ip_network(network, strict=False)
+            except ValueError:
+                widgets.message(self.window, "Freigegebene Netze prüfen",
+                                f"„{network}“ ist kein Netz in CIDR-Schreibweise (z. B. 10.0.0.0/24).", "warning")
+                return
+        path, _filter = QFileDialog.getSaveFileName(self.window, "Agent-Konfiguration speichern", "config.json",
+                                                    "JSON (*.json)")
+        if not path:
+            return
+        data = agent_client.agent_config(key, self.agent_port.value(),
+                                         [str(ipaddress.ip_network(n, strict=False)) for n in networks])
+        try:
+            with open(path, "w", encoding="utf-8") as stream:
+                json.dump(data, stream, indent=2)
+        except OSError as error:
+            widgets.error(self.window, "Speichern fehlgeschlagen", str(error))
+            return
+        self.window.toast("config.json gespeichert – zusammen mit agent.exe per Intune oder GPO verteilen.",
+                          "success")
 
     def _current_user_toggled(self, value):
         self._save(use_current_user=value)
@@ -416,12 +554,14 @@ class ClientsPage(Page):
             return
         self.ad_server.editingFinished.emit()
         self.ad_base.editingFinished.emit()
-        if self._ensure_logon():
+        if self.state.client_options.get("mode") == "agent":
+            self.actions.scan_clients()
+        elif self._ensure_logon():
             self.actions.scan_clients()
 
     def rescan(self):
         rows = self.model.checked_rows()
-        if rows and self._ensure_logon():
+        if rows and (self.state.client_options.get("mode") == "agent" or self._ensure_logon()):
             self.actions.scan_clients(rows)
 
     def load_file(self):
@@ -436,5 +576,7 @@ class ClientsPage(Page):
         else:
             self.actions.sync_clients(rows)
 
-    def show_help(self, tab=0):
-        ClientHelpDialog(self.window, self.state, tab if isinstance(tab, int) else 0).exec()
+    def show_help(self, tab=None):
+        if tab is None or isinstance(tab, bool):  # button signals pass "checked"
+            tab = 3 if self.state.client_options.get("mode") == "agent" else 0
+        ClientHelpDialog(self.window, self.state, tab).exec()
