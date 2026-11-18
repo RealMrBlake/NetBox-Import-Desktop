@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
 )
 
 from netbox_sync.core import netscan, printers, snmp
@@ -194,11 +195,13 @@ class SnmpCredentialsDialog(_Dialog):
 class ModelMappingDialog(_Dialog):
     """Decide per printer model that is missing in NetBox: create, map to an existing type, skip or ignore."""
 
-    def __init__(self, parent, rows, device_types):
+    def __init__(self, parent, rows, device_types, others=()):
         super().__init__(parent, "Modelle zuordnen",
-                         "Diese Modelle gibt es in NetBox nicht als Gerätetyp. Gerätetypen werden nicht automatisch "
-                         "angelegt – pro Modell einen vorhandenen Gerätetyp wählen, die Drucker dieses Modells diesmal "
-                         "überspringen oder dauerhaft ignorieren (gespeichert im Profil).", width=900)
+                         "Hier stehen nur Modelle, die es in NetBox nicht als Gerätetyp gibt"
+                         + (f" – die übrigen {len(others)} neuen Drucker haben einen und werden normal übertragen"
+                            if others else "") + ". Gerätetypen werden nicht automatisch angelegt – pro Modell einen "
+                         "vorhandenen Gerätetyp wählen, die Drucker dieses Modells diesmal überspringen oder dauerhaft "
+                         "ignorieren (gespeichert im Profil).", width=900)
         self.resize(1040, 520)
         type_items = [(f"{row['manufacturer']} {row['model']}".strip(), row["id"]) for row in device_types]
         self.table = QTableWidget(0, 4)
@@ -229,10 +232,41 @@ class ModelMappingDialog(_Dialog):
         for column, width in enumerate((330, 60, 250, 300)):
             self.table.setColumnWidth(column, width)
         self.root.addWidget(self.table, 1)
+        if others:
+            self._add_others(others)
         self.root.addWidget(self.error_banner)
         buttons, _ok = form_dialog_buttons(self, "Übernehmen")
         self.root.addWidget(buttons)
         self.result = {}
+
+    def _add_others(self, others):
+        """Collapsed list of the new printers whose device type exists – they need no decision here."""
+        caption = f"Weitere neue Drucker mit vorhandenem Gerätetyp ({len(others)})"
+        toggle = QToolButton()
+        toggle.setText(caption)
+        toggle.setCheckable(True)
+        toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        toggle.setArrowType(Qt.RightArrow)
+        toggle.setAutoRaise(True)
+        table = QTableWidget(len(others), 3)
+        table.setHorizontalHeaderLabels(["Drucker", "Hersteller / Modell (SNMP)", "Gerätetyp in NetBox"])
+        for row, (name, model, device_type) in enumerate(others):
+            for column, text in enumerate((name, model, device_type)):
+                table.setItem(row, column, QTableWidgetItem(text))
+        table.verticalHeader().hide()
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.setSelectionMode(QTableWidget.NoSelection)
+        table.horizontalHeader().setStretchLastSection(True)
+        for column, width in enumerate((260, 330, 300)):
+            table.setColumnWidth(column, width)
+        table.setVisible(False)
+
+        def toggled(shown):
+            toggle.setArrowType(Qt.DownArrow if shown else Qt.RightArrow)
+            table.setVisible(shown)
+        toggle.toggled.connect(toggled)
+        self.root.addWidget(toggle)
+        self.root.addWidget(table, 1)
 
     def accept(self):
         result = {}
@@ -629,7 +663,16 @@ class PrintersPage(AccessPointsPage):
                 decision["action"] = "skip"
             text = f"{first.get('manufacturer') or 'Unbekannt'} · {first.get('model') or '(kein Modell – nur Ports)'}"
             rows.append((text, len(members), key, decision, self.engine.suggest_type(first)))
-        dialog = ModelMappingDialog(self.window, rows, self.engine.device_types)
+        others = []
+        for printer in self.aps:
+            if printer.get("device") or self._excluded(printer):
+                continue
+            row = self.engine.existing_type(printer)
+            if row:
+                others.append((" · ".join(filter(None, (printer["name"], printer.get("ip")))),
+                               f"{printer.get('manufacturer') or ''} · {printer.get('model') or ''}",
+                               f"{row['manufacturer']} {row['model']}".strip()))
+        dialog = ModelMappingDialog(self.window, rows, self.engine.device_types, others)
         if not dialog.exec():
             return False
         for key, value in dialog.result.items():

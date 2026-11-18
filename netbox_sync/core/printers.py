@@ -378,12 +378,17 @@ class PrinterSyncEngine(APSyncEngine):
                                    key=lambda row: (row["manufacturer"].casefold(), row["model"].casefold()))
         return result
 
+    def existing_type(self, printer):
+        """NetBox device type row of ``printer`` (same manufacturer and model), or ``None``."""
+        manufacturer, model, _platform = self._identity(printer)
+        return next((row for row in self.device_types if row["model"].casefold() == model.casefold()
+                     and row["manufacturer"].casefold() in (
+                         manufacturer.casefold(), "hewlett-packard" if manufacturer.casefold() == "hp" else "")),
+                    None)
+
     def type_exists(self, printer):
         """Is the device type of ``printer`` already in NetBox (same manufacturer and model)?"""
-        manufacturer, model, _platform = self._identity(printer)
-        return any(row["model"].casefold() == model.casefold() and row["manufacturer"].casefold() in (
-            manufacturer.casefold(), "hewlett-packard" if manufacturer.casefold() == "hp" else "")
-            for row in self.device_types)
+        return self.existing_type(printer) is not None
 
     def suggest_type(self, printer):
         """Device type with a similar model name, or ``None``."""
