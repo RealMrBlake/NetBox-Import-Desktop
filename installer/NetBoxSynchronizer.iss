@@ -3,7 +3,7 @@
 
 #define AppName "NetBox Synchronizer"
 #ifndef AppVersion
-  #define AppVersion "4.17.1"
+  #define AppVersion "4.18.0"
 #endif
 #define AppPublisher "Louis-Alexander Kerst"
 #define AppExeName "NetBoxSynchronizer.exe"
