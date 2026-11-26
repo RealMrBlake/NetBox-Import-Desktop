@@ -86,7 +86,11 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
   decisions are stored per profile (shared by all its switches); only VLANs
   that still need a decision are shown, stored and unambiguous ones are in a
   collapsed section that can be expanded for editing. Mapped VLANs are assigned
-  to the ports (802.1Q mode, untagged/tagged)
+  to the ports (802.1Q mode, untagged/tagged). The interface at the other end
+  of a port's cable (e.g. a router or access point) is kept in step: VLANs it
+  is missing are added, VLANs the switch port no longer carries are removed;
+  other VLANs there stay. After the preview the app asks before changing these
+  far ends ("Nur Switch" syncs the switch alone)
 - Tenant required: a switch without tenant in NetBox is refused; every created
   IP address, prefix, VRF, VLAN and cable gets the switch's tenant
 - Stacks are detected (Aruba CX VSF, ArubaOS-Switch stacking/VSF, HPE Comware

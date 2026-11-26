@@ -1920,7 +1920,7 @@ def _check_cable(nb, local, remote, label, update_cables, dry_run, report):
 
 
 def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=False, log=_noop,
-                            backup_config=False, update_cables=False):
+                            backup_config=False, update_cables=False, sync_peer_vlans=True):
     """Write a discovery snapshot to NetBox.
 
     With ``dry_run`` nothing is written; the returned report lists what would
@@ -1950,7 +1950,7 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
                           and stack_member(name, snapshot.get("platform")) == member)
             report["notes"].append(f"Stack-Mitglied {member}: kein NetBox-Gerät gewählt – {skipped} Ports übersprungen")
     _sync_switch_stack(nb, device, members, dry_run, report)
-    records, foreign = {}, set()
+    records, foreign, port_vlans, old_vlans = {}, set(), {}, {}
 
     for interface in snapshot["interfaces"]:
         key = interface_key(interface["name"])
@@ -1962,6 +1962,13 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
         port = dict(interface, vlans=without_vlans(interface.get("vlans"), ignored))
         label = port_label(port["vlans"], interface.get("lag"))
         owner_vlans = _vlans_for_site(vlan_ids, vlan_sites, related_id(owner, "site"), owner, foreign, report)
+        if netbox_interface_type(interface) != "virtual":
+            port_vlans[key] = port["vlans"] or {}
+            if record:
+                # VLANs the port had before this run – the ones it loses are removed at the far end, too.
+                old_vlans[key] = ({related_id(record, "untagged_vlan")}
+                                  | {getattr(item, "id", item) for item in getattr(record, "tagged_vlans", None) or []})
+                old_vlans[key].discard(None)
         try:
             if record:
                 changes = {}
@@ -2054,6 +2061,7 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
             except Exception as error:  # noqa: BLE001
                 report["errors"].append(f"IP-Adresse {address} auf {interface['name']}: {error}")
 
+    new_peers = {}
     if create_cables:
         lookup = _RemoteLookup(nb)
         manual_devices = config.get("neighbor_devices") or {}
@@ -2120,11 +2128,90 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
                         "tenant": tenant_id,
                     })
                     remote.cable = True  # avoid a second cable from the reverse direction
+                new_peers[key] = remote
             except Exception as error:  # noqa: BLE001
                 report["errors"].append(f"Nachbar {label}: {error}")
+    if sync_peer_vlans:
+        _sync_peer_vlans(nb, records, port_vlans, old_vlans, new_peers, vlan_ids, vlan_sites, own_devices, dry_run, report)
     if backup_config:
         _backup_config(nb, device, snapshot, dry_run, report)
     return report
+
+
+def _cable_peer(nb, record):
+    """The single far-end interface of ``record``'s cable, or ``None``."""
+    cable_id = related_id(record, "cable")
+    if not cable_id:
+        return None
+    cable = nb.dcim.cables.get(cable_id)
+    if cable is None:
+        return None
+    sides = [list(_term(cable, "a_terminations") or []), list(_term(cable, "b_terminations") or [])]
+    local_side = next((side for side in sides if any(_term(item, "object_id") == record.id for item in side)), None)
+    far = sides[1] if local_side is sides[0] else sides[0]
+    if local_side is None or len(far) != 1 or _term(far[0], "object_type") != "dcim.interface":
+        return None
+    return nb.dcim.interfaces.get(_term(far[0], "object_id"))
+
+
+def _sync_peer_vlans(nb, records, port_vlans, old_vlans, new_peers, vlan_ids, vlan_sites, own_devices, dry_run, report):
+    """Keep the interface at the other end of each switch port's cable in step with the port.
+
+    VLANs the port carries are added; VLANs the port carried before this run but
+    no longer does are removed. Other VLANs of the far end stay untouched. Devices
+    synced by this run are skipped, so the far end never has to be maintained by hand.
+    """
+    site_cache = {}
+    for key, vlans in port_vlans.items():
+        record = records.get(key)
+        try:
+            peer = new_peers.get(key)
+            if peer is not None and not isinstance(getattr(peer, "id", None), int):
+                peer = None
+            if peer is None and record is not None and not isinstance(getattr(record, "cable", None), bool):
+                peer = _cable_peer(nb, record)
+            if peer is None:
+                continue
+            peer_device = related_id(peer, "device")
+            if peer_device in own_devices or vlans.get("tagged_all"):
+                continue
+            port_ids = {vlan_ids[vid] for vid in list(vlans.get("untagged", [])) + list(vlans.get("tagged", []))
+                        if vid in vlan_ids}
+            removed = old_vlans.get(key, set()) - port_ids
+            if peer_device not in site_cache:
+                site_cache[peer_device] = related_id(nb.dcim.devices.get(peer_device), "site")
+            peer_site = site_cache[peer_device]
+
+            def allowed(vid):
+                return vid in vlan_ids and vlan_sites.get(vid, (None,))[0] in (None, peer_site)
+
+            mode = _record_mode(peer)
+            if mode == "tagged-all":
+                continue
+            current_untagged = related_id(peer, "untagged_vlan")
+            current_tagged = {getattr(item, "id", item) for item in getattr(peer, "tagged_vlans", None) or []}
+            untagged = next((vlan_ids[vid] for vid in vlans.get("untagged", []) if allowed(vid)), None)
+            tagged = {vlan_ids[vid] for vid in vlans.get("tagged", []) if allowed(vid)}
+            kept_untagged = None if current_untagged in removed else current_untagged
+            new_untagged = kept_untagged or untagged
+            new_tagged = ((current_tagged - removed) | tagged) - {new_untagged}
+            if new_untagged == current_untagged and new_tagged == current_tagged:
+                continue
+            new_mode = "tagged" if new_tagged else "access" if new_untagged else None
+            peer_name = f"{_term(_term(peer, 'device') or {}, 'name') or peer_device} {peer.name}"
+            before = current_tagged | ({current_untagged} - {None})
+            after = new_tagged | ({new_untagged} - {None})
+            texts = []
+            if after - before:
+                texts.append(f"{len(after - before)} VLAN(s) vom Switch-Port übernommen")
+            if before - after:
+                texts.append(f"{len(before - after)} VLAN(s) entfernt (am Switch-Port weggefallen)")
+            report["changes"].append(f"Gegenstelle {peer_name}: {', '.join(texts) or 'VLAN-Zuordnung angepasst'}")
+            if not dry_run:
+                peer.update({"mode": new_mode, "untagged_vlan": new_untagged,
+                             "tagged_vlans": sorted(new_tagged, key=str)})
+        except Exception as error:  # noqa: BLE001
+            report["errors"].append(f"VLANs der Gegenstelle von {key}: {error}")
 
 
 def describe_snapshot(snapshot):

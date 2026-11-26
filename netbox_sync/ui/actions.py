@@ -567,14 +567,23 @@ class Actions:
                 # Opened after the preview task has fully finished, so the
                 # follow-up task is not rejected as "still busy".
                 dialog = SyncPreviewDialog(self.window, reports, create_cables)
-                if dialog.exec():
-                    self._apply_switch_sync(nb, items, create_cables, log, update_cables)
+                if not dialog.exec():
+                    return
+                peers = [f"{switch['name']}: {change}" for switch, report in reports
+                         for change in report["changes"] if change.startswith("Gegenstelle ")]
+                sync_peers = not peers or widgets.confirm(
+                    self.window, "Gegenstellen anpassen?",
+                    f"An {len(peers)} per Kabel verbundenen Schnittstelle(n) anderer Geräte weichen die VLANs vom "
+                    "Switch-Port ab. Sollen sie angeglichen werden (fehlende ergänzen, am Switch weggefallene "
+                    "entfernen)? Ohne Anpassung wird nur der Switch synchronisiert.",
+                    ok_text="Angleichen", cancel_text="Nur Switch", details="\n".join(peers))
+                self._apply_switch_sync(nb, items, create_cables, log, update_cables, sync_peers)
             QTimer.singleShot(0, ask)
 
         self.tasks.run(plan, title="Zuordnung ermitteln", area="switch", on_success=review,
                        on_error=self._netbox_failed)
 
-    def _apply_switch_sync(self, nb, items, create_cables, log, update_cables=False):
+    def _apply_switch_sync(self, nb, items, create_cables, log, update_cables=False, sync_peers=True):
         def work(ctx):
             reports = []
             for index, (switch, snapshot) in enumerate(items):
@@ -583,7 +592,7 @@ class Actions:
                 ctx.log(f"{switch['name']}: übertrage nach NetBox …")
                 report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables, dry_run=False,
                                                  backup_config=self.state.settings.get("backup_config"),
-                                                 update_cables=update_cables)
+                                                 update_cables=update_cables, sync_peer_vlans=sync_peers)
                 for error in report["errors"]:
                     ctx.log(f"{switch['name']}: {error}", "error")
                 for note in report.get("notes", []):

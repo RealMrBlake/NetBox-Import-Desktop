@@ -679,3 +679,32 @@ def test_chosen_interface_of_another_device_is_ignored():
     assert plan_switch_sync(nb, switch, snapshot)["neighbors"][0]["interface_id"] is None
     report = sync_snapshot_to_netbox(nb, switch, snapshot, dry_run=True)
     assert report["cables_created"] == 0
+
+
+def test_far_end_of_a_cable_gets_missing_vlans_of_the_switch_port():
+    nb, switch, snapshot = _numbered_setup()
+    nb.ipam.vlans.records += [
+        Record(nb.ipam.vlans, id=120, vid=20, name="LAN", tenant=SimpleNamespace(id=7), site=None),
+        Record(nb.ipam.vlans, id=136, vid=36, name="WMGMT", tenant=SimpleNamespace(id=7), site=None),
+    ]
+    snapshot["interfaces"][1]["vlans"] = {"untagged": [20], "tagged": [36], "tagged_all": False}
+    nb.dcim.interfaces.get(2).cable = SimpleNamespace(id=70)
+    peer = nb.dcim.interfaces.get(20)
+    peer.cable, peer.mode, peer.untagged_vlan, peer.tagged_vlans = SimpleNamespace(id=70), "access", 120, []
+    nb.dcim.cables.records.append(Record(nb.dcim.cables, id=70,
+                                         a_terminations=[{"object_type": "dcim.interface", "object_id": 2}],
+                                         b_terminations=[{"object_type": "dcim.interface", "object_id": 20}]))
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False, dry_run=True)
+    assert any("Gegenstelle" in change and "1 VLAN" in change for change in report["changes"])
+    sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False)
+    assert peer.mode == "tagged" and peer.untagged_vlan == 120 and peer.tagged_vlans == [136]
+    again = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False, dry_run=True)
+    assert not any("Gegenstelle" in change for change in again["changes"])
+    # VLAN 36 is removed on the switch: it disappears at the far end, too; a manual VLAN stays.
+    nb.ipam.vlans.records.append(Record(nb.ipam.vlans, id=199, vid=99, name="MANUELL", tenant=SimpleNamespace(id=7),
+                                        site=None))
+    peer.tagged_vlans = [136, 199]
+    snapshot["interfaces"][1]["vlans"] = {"untagged": [20], "tagged": [], "tagged_all": False}
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False)
+    assert any("1 VLAN(s) entfernt" in change for change in report["changes"])
+    assert peer.untagged_vlan == 120 and peer.tagged_vlans == [199] and peer.mode == "tagged"
