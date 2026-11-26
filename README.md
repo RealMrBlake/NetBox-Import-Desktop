@@ -89,7 +89,8 @@ vSphere and Proxmox VE, HPE/Aruba switches and Windows clients in NetBox.
   to the ports (802.1Q mode, untagged/tagged). The interface at the other end
   of a port's cable (e.g. a router or access point) is kept in step: VLANs it
   is missing are added, VLANs the switch port no longer carries are removed;
-  other VLANs there stay. After the preview the app asks before changing these
+  other VLANs there stay. The same applies to the connection VLANs of the
+  cable itself (NetBox Utilities plugin, `cable-vlans` API). After the preview the app asks before changing these
   far ends ("Nur Switch" syncs the switch alone)
 - Tenant required: a switch without tenant in NetBox is refused; every created
   IP address, prefix, VRF, VLAN and cable gets the switch's tenant

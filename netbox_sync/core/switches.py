@@ -2061,7 +2061,7 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
             except Exception as error:  # noqa: BLE001
                 report["errors"].append(f"IP-Adresse {address} auf {interface['name']}: {error}")
 
-    new_peers = {}
+    new_peers, new_cables = {}, {}
     if create_cables:
         lookup = _RemoteLookup(nb)
         manual_devices = config.get("neighbor_devices") or {}
@@ -2121,7 +2121,7 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
                 report["cables_created"] += 1
                 report["changes"].append(f"Kabel {device.name} {label}")
                 if not dry_run:
-                    nb.dcim.cables.create({
+                    new_cables[key] = nb.dcim.cables.create({
                         "a_terminations": [{"object_type": "dcim.interface", "object_id": local.id}],
                         "b_terminations": [{"object_type": "dcim.interface", "object_id": remote.id}],
                         "status": "connected",
@@ -2132,10 +2132,58 @@ def sync_snapshot_to_netbox(nb, config, snapshot, create_cables=True, dry_run=Fa
             except Exception as error:  # noqa: BLE001
                 report["errors"].append(f"Nachbar {label}: {error}")
     if sync_peer_vlans:
+        _sync_cable_vlans(nb, records, port_vlans, old_vlans, new_cables, vlan_ids, own_devices, dry_run, report)
         _sync_peer_vlans(nb, records, port_vlans, old_vlans, new_peers, vlan_ids, vlan_sites, own_devices, dry_run, report)
     if backup_config:
         _backup_config(nb, device, snapshot, dry_run, report)
     return report
+
+
+def _sync_cable_vlans(nb, records, port_vlans, old_vlans, new_cables, vlan_ids, own_devices, dry_run, report):
+    """Keep the connection VLANs of each port's cable (NetBox Utilities plugin) in step with the port.
+
+    Like the far end: the port's VLANs are added, VLANs it lost in this run are
+    removed, others stay. Without the plugin (or its cable VLAN API) nothing happens.
+    """
+    try:
+        endpoint = nb.plugins.utilities.cable_vlans
+    except AttributeError:
+        return
+    for key, vlans in port_vlans.items():
+        record = records.get(key)
+        cable_id = getattr(new_cables.get(key), "id", None) or (related_id(record, "cable") if record else None)
+        if not isinstance(cable_id, int) or vlans.get("tagged_all"):
+            continue
+        try:
+            peer = _cable_peer(nb, record) if record else None
+            if peer is not None and related_id(peer, "device") in own_devices:
+                continue  # switch-to-switch cable: both sides sync it, VLANs would flip
+            port_ids = {vlan_ids[vid] for vid in list(vlans.get("untagged", [])) + list(vlans.get("tagged", []))
+                        if isinstance(vlan_ids.get(vid), int)}
+            removed = old_vlans.get(key, set()) - port_ids
+            assignments = list(endpoint.filter(cable_id=cable_id))
+            assignment = assignments[0] if assignments else None
+            current = {getattr(item, "id", item) for item in (getattr(assignment, "vlans", None) or [])}
+            wanted = (current - removed) | port_ids
+            if wanted == current:
+                continue
+            texts = []
+            if wanted - current:
+                texts.append(f"{len(wanted - current)} VLAN(s) vom Switch-Port übernommen")
+            if current - wanted:
+                texts.append(f"{len(current - wanted)} VLAN(s) entfernt (am Switch-Port weggefallen)")
+            name = record.name if record else key
+            report["changes"].append(f"Kabel-VLANs {name}: {', '.join(texts)}")
+            if dry_run:
+                continue
+            if assignment:
+                assignment.update({"vlans": sorted(wanted)})
+            else:
+                endpoint.create({"cable": cable_id, "vlans": sorted(wanted)})
+        except Exception as error:  # noqa: BLE001
+            if getattr(getattr(error, "req", None), "status_code", None) == 404:
+                return  # plugin version without the cable VLAN API
+            report["errors"].append(f"Kabel-VLANs von {key}: {error}")
 
 
 def _cable_peer(nb, record):

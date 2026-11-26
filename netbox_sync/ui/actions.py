@@ -570,11 +570,11 @@ class Actions:
                 if not dialog.exec():
                     return
                 peers = [f"{switch['name']}: {change}" for switch, report in reports
-                         for change in report["changes"] if change.startswith("Gegenstelle ")]
+                         for change in report["changes"] if change.startswith(("Gegenstelle ", "Kabel-VLANs "))]
                 sync_peers = not peers or widgets.confirm(
                     self.window, "Gegenstellen anpassen?",
-                    f"An {len(peers)} per Kabel verbundenen Schnittstelle(n) anderer Geräte weichen die VLANs vom "
-                    "Switch-Port ab. Sollen sie angeglichen werden (fehlende ergänzen, am Switch weggefallene "
+                    f"{len(peers)} Kabel bzw. per Kabel verbundene Schnittstelle(n) anderer Geräte haben andere VLANs als "
+                    "der Switch-Port. Sollen sie angeglichen werden (fehlende ergänzen, am Switch weggefallene "
                     "entfernen)? Ohne Anpassung wird nur der Switch synchronisiert.",
                     ok_text="Angleichen", cancel_text="Nur Switch", details="\n".join(peers))
                 self._apply_switch_sync(nb, items, create_cables, log, update_cables, sync_peers)

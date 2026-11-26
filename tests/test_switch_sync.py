@@ -708,3 +708,29 @@ def test_far_end_of_a_cable_gets_missing_vlans_of_the_switch_port():
     report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False)
     assert any("1 VLAN(s) entfernt" in change for change in report["changes"])
     assert peer.untagged_vlan == 120 and peer.tagged_vlans == [199] and peer.mode == "tagged"
+
+
+def test_cable_vlans_of_the_utilities_plugin_follow_the_switch_port():
+    nb, switch, snapshot = _numbered_setup()
+    nb.ipam.vlans.records += [
+        Record(nb.ipam.vlans, id=120, vid=20, name="LAN", tenant=SimpleNamespace(id=7), site=None),
+        Record(nb.ipam.vlans, id=136, vid=36, name="WMGMT", tenant=SimpleNamespace(id=7), site=None),
+    ]
+    snapshot["interfaces"][1]["vlans"] = {"untagged": [20], "tagged": [36], "tagged_all": False}
+    nb.dcim.interfaces.get(2).cable = SimpleNamespace(id=70)
+    nb.dcim.cables.records.append(Record(nb.dcim.cables, id=70,
+                                         a_terminations=[{"object_type": "dcim.interface", "object_id": 2}],
+                                         b_terminations=[{"object_type": "dcim.interface", "object_id": 20}]))
+    nb.plugins = SimpleNamespace(utilities=SimpleNamespace(cable_vlans=Endpoint()))
+    cable_vlans = nb.plugins.utilities.cable_vlans
+    report = sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False, dry_run=True)
+    assert "Kabel-VLANs 2: 2 VLAN(s) vom Switch-Port übernommen" in report["changes"] and cable_vlans.created == []
+    sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False)
+    assert cable_vlans.created == [{"cable": 70, "vlans": [120, 136]}]
+    cable_vlans.records[0].cable = SimpleNamespace(id=70)
+
+    # VLAN 36 is removed on the switch; a VLAN set by hand on the cable stays.
+    cable_vlans.records[0].vlans = [120, 136, 199]
+    snapshot["interfaces"][1]["vlans"] = {"untagged": [20], "tagged": [], "tagged_all": False}
+    sync_snapshot_to_netbox(nb, switch, snapshot, create_cables=False)
+    assert cable_vlans.updates[-1] == (cable_vlans.records[0].id, {"vlans": [120, 199]})

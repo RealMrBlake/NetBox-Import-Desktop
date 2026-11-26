@@ -68,7 +68,7 @@ class Endpoint:
     def create(self, payload):
         if isinstance(payload, list):  # bulk create
             return [self.create(item) for item in payload]
-        record = Record(self, id=next(_ids), cable=None, **payload)
+        record = Record(self, **{"id": next(_ids), "cable": None, **payload})
         self.records.append(record)
         self.created.append(payload)
         return record
