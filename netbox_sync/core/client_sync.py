@@ -30,6 +30,7 @@ def inventory_report(client):
                                                        else "") if part)),
         ("CPU", f"{client['cpu']} ({client.get('cores') or '?'} Kerne)" if client.get("cpu") else ""),
         ("RAM", f"{client['memory'] / 1024 ** 3:.0f} GB" if client.get("memory") else ""),
+        ("Zuletzt angemeldet", (client.get("user") or "").strip()),
         ("Erfasst", client.get("scanned_at") and time.strftime("%d.%m.%Y %H:%M", time.localtime(client["scanned_at"]))),
     ):
         if value:
@@ -302,7 +303,7 @@ class ClientSyncEngine:
         if (client.get("uuid") or client.get("user")) and (getattr(asset, "description", "") or "") != description:
             updates["description"] = description
         current = getattr(asset, "comments", "") or ""
-        if report_text and _without_timestamp(_report_body(current)) != _without_timestamp(report_text):
+        if report_text and (updates or _without_timestamp(_report_body(current)) != _without_timestamp(report_text)):
             updates["comments"] = merge_report(current, report_text)
         if not updates:
             return []
@@ -411,7 +412,7 @@ class ClientSyncEngine:
                 changes.append(f"Beschreibung → {description}")
             report_text = inventory_report(client)
             current = getattr(device, "comments", "") or ""
-            if report_text and _without_timestamp(_report_body(current)) != _without_timestamp(report_text):
+            if report_text and (updates or _without_timestamp(_report_body(current)) != _without_timestamp(report_text)):
                 updates["comments"] = merge_report(current, report_text)
                 changes.append(f"Inventarbericht aktualisieren ({len(client.get('software') or [])} Programme)")
             if updates:

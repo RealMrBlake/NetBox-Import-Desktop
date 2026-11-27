@@ -241,9 +241,21 @@ def chassis_name(types):
     return ""
 
 
+def _strip_nul(value):
+    """Drop NUL characters (some installers pad registry strings with them; NetBox rejects them)."""
+    if isinstance(value, str):
+        return value.replace("\x00", "").strip() if "\x00" in value else value
+    if isinstance(value, dict):
+        return {key: _strip_nul(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_strip_nul(item) for item in value]
+    return value
+
+
 def apply_scan(row, raw, now=None):
     """Merge the raw WinRM result into a result row."""
     row = dict(row)
+    raw = _strip_nul(raw)
     row["scanned_at"] = now or time.time()
     if not raw.get("ok"):
         row["status"] = "error"

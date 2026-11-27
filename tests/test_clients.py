@@ -338,3 +338,13 @@ def test_asset_gets_the_tenant_of_the_transfer_or_the_device():
     again.load_targets()
     report = again.sync([client2], 1, 2, dry_run=False)
     assert report["errors"] == [] and assets2.records[0].tenant == 9 and assets2.records[0].device == 300
+
+
+def test_nul_characters_are_stripped_and_user_is_in_the_report():
+    from netbox_sync.core.client_sync import inventory_report
+    from netbox_sync.core.clients import apply_scan
+    raw = {"ok": True, "source": "agent", "name": "pc01", "user": "FIRMA\max",
+           "software": [{"name": "Office", "version": "16", "publisher": "Microsoft\x00"}]}
+    row = apply_scan({"name": "PC01"}, raw, now=0)
+    assert row["software"][0]["publisher"] == "Microsoft"
+    assert "- **Zuletzt angemeldet:** FIRMA\max" in inventory_report(row)
