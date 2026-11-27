@@ -368,8 +368,9 @@ class ClientsPage(Page):
         self.agent_targets.setFixedHeight(52)
         grid.addWidget(label("Ziele"), 0, 0)
         grid.addWidget(self.agent_targets, 0, 1, 1, 5)
-        self.agent_key = PasswordField("noch kein Schlüssel")
-        self.agent_key.setReadOnly(True)
+        self.agent_key = PasswordField("Schlüssel erzeugen oder vorhandenen einfügen")
+        self.agent_key.setToolTip("Schlüssel bereits verteilter Agenten hier einfügen")
+        self.agent_key.editingFinished.connect(self._agent_key_edited)
         grid.addWidget(label("Agent-Schlüssel"), 1, 0)
         grid.addWidget(self.agent_key, 1, 1)
         self.agent_key_new = button("Neu erzeugen", "refresh", on_click=self.new_agent_key,
@@ -399,6 +400,17 @@ class ClientsPage(Page):
         self.agent_key_copy.setEnabled(bool(key))
         self.agent_config.setEnabled(bool(key))
         self.agent_key_new.setText("Neu erzeugen" if key else "Schlüssel erzeugen")
+
+    def _agent_key_edited(self):
+        if self.state.profile is None:
+            return
+        key = self.agent_key.text().strip()
+        if key == self.state.profile.get("agent_key", ""):
+            return
+        self.state.edit_profile(agent_key=key)
+        self._update_agent_key()
+        if key:
+            self.window.toast("Agent-Schlüssel übernommen.", "info")
 
     def new_agent_key(self):
         if self.state.profile is None:

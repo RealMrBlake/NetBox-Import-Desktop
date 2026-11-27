@@ -56,6 +56,16 @@ def _cell(text):
     return str(text or "").replace("|", "/").replace("\n", " ").strip()
 
 
+def client_description(client):
+    """Short description for asset and device: UUID and the last signed-in user."""
+    parts = ["Windows-Client"]
+    if client.get("uuid"):
+        parts.append(f"UUID {client['uuid']}")
+    if (client.get("user") or "").strip():
+        parts.append(f"Zuletzt angemeldet: {client['user'].strip()}")
+    return "; ".join(parts)[:200]
+
+
 def merge_report(comments, report):
     """Replace the managed report block in ``comments`` and keep everything written by hand."""
     comments = comments or ""
@@ -263,7 +273,7 @@ class ClientSyncEngine:
         if len(assets) > 1:
             return [f"Asset übersprungen – {len(assets)} Assets mit der Seriennummer {serial}"]
         report_text = inventory_report(client)
-        description = f"Windows-Client; UUID {client['uuid']}" if client.get("uuid") else "Windows-Client"
+        description = client_description(client)
         if not assets:
             report["assets_created"] += 1
             if not dry_run:
@@ -289,7 +299,7 @@ class ClientSyncEngine:
             updates["device"] = device.id
         if tenant_id and related_id(asset, "tenant") is None:
             updates["tenant"] = tenant_id
-        if client.get("uuid") and (getattr(asset, "description", "") or "") != description:
+        if (client.get("uuid") or client.get("user")) and (getattr(asset, "description", "") or "") != description:
             updates["description"] = description
         current = getattr(asset, "comments", "") or ""
         if report_text and _without_timestamp(_report_body(current)) != _without_timestamp(report_text):
@@ -300,7 +310,7 @@ class ClientSyncEngine:
         if not dry_run:
             asset.update(updates)
         labels = {"name": "Name", "status": "Status", "device_type": "Gerätetyp", "device": "Gerät", "tenant": "Mandant",
-                  "description": "UUID", "comments": "Inventarbericht"}
+                  "description": "Beschreibung", "comments": "Inventarbericht"}
         return ["Asset aktualisieren: " + ", ".join(labels[key] for key in updates)]
 
     def software_sync(self):
@@ -365,7 +375,8 @@ class ClientSyncEngine:
                 if self.software:
                     changes.extend(self._sync_software(client, None, dry_run, report))
                 return changes
-            payload = {"name": name, "device_type": type_id, "role": role_id, "site": site_id, "status": "active"}
+            payload = {"name": name, "device_type": type_id, "role": role_id, "site": site_id, "status": "active",
+                       "description": client_description(client)}
             if platform_id:
                 payload["platform"] = platform_id
             if serial:
@@ -394,6 +405,10 @@ class ClientSyncEngine:
             if tenant_id and related_id(device, "tenant") is None:
                 updates["tenant"] = tenant_id
                 changes.append("Mandant setzen")
+            description = client_description(client)
+            if (client.get("uuid") or client.get("user")) and (getattr(device, "description", "") or "") != description:
+                updates["description"] = description
+                changes.append(f"Beschreibung → {description}")
             report_text = inventory_report(client)
             current = getattr(device, "comments", "") or ""
             if report_text and _without_timestamp(_report_body(current)) != _without_timestamp(report_text):

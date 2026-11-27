@@ -285,7 +285,7 @@ def test_new_client_gets_an_asset_linked_to_the_device():
     device = nb.dcim.devices.records[0]
     asset = assets.created[0]
     assert asset["serial"] == "PW0K84A9" and asset["device"] == device.id and asset["status"] == "used"
-    assert asset["device_type"] == device.device_type and asset["description"] == "Windows-Client; UUID 4C4C-1234"
+    assert asset["device_type"] == device.device_type and asset["description"] == "Windows-Client; UUID 4C4C-1234; Zuletzt angemeldet: FIRMA\max"
     assert "| 7-Zip | 24 |  |" in asset["comments"]
 
     again = ClientSyncEngine(nb)
